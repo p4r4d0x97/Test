@@ -2342,30 +2342,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # (only usernames + timestamps, not command details).
             try:
                 entries = load_admin_log()
-                # events we care about — position/layout mutations.
-                # Names must match those actually emitted by _diff_layouts()
-                # and other places that call log_admin().
                 keep_events = {
-                    # device layout events (from _diff_layouts)
                     "placed", "moved", "unplaced", "display-name", "resized", "note",
-                    # room events
                     "room-added", "room-deleted",
-                    # rack events
                     "rack-added", "rack-deleted",
-                    # manual add via ➕
                     "manual-add",
-                    # scan events (also touches devices)
                     "scan-run", "scan-manual-add",
                 }
-                latest = {}   # target -> {by, ts, event}
+                def _to_epoch(ts_val):
+                    # log_admin() stores ts as "YYYY-MM-DD HH:MM:SS" (local time).
+                    # Convert to epoch seconds for the client's age math.
+                    if isinstance(ts_val, (int, float)):
+                        return int(ts_val)
+                    try:
+                        return int(time.mktime(time.strptime(str(ts_val), "%Y-%m-%d %H:%M:%S")))
+                    except Exception:
+                        return 0
+                latest = {}
                 for e in entries:   # newest first from load_admin_log
                     ev = e.get("event","")
                     tgt = e.get("target","")
                     if not tgt or ev not in keep_events: continue
-                    if tgt in latest: continue   # keep only newest
+                    if tgt in latest: continue
                     latest[tgt] = {
                         "by": e.get("user",""),
-                        "ts": e.get("ts", 0),
+                        "ts": _to_epoch(e.get("ts")),
                         "event": ev,
                     }
                 self._json({"ok": True, "touched": latest, "count": len(latest)})

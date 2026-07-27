@@ -1389,7 +1389,8 @@ svg#cv.pen{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/s
         <div><code style="color:var(--accent)">type=printer</code> — by device type</div>
         <div><code style="color:var(--accent)">switch=192.168.8.10</code> — devices on this switch</div>
         <div><code style="color:var(--accent)">port=1/32</code> — specific switch port</div>
-        <div><code style="color:var(--accent)">status=offline</code> — by ping status (online/offline/no_info)</div>
+        <div><code style="color:var(--accent)">status=offline</code> — raw ping status (includes stale entries)</div>
+        <div><code style="color:var(--accent)">state=online</code> — effective status (age-aware, matches map dot color)</div>
         <div><code style="color:var(--accent)">name=C026</code> — substring of device name</div>
         <div><code style="color:var(--accent)">designation=server</code> — designation field</div>
         <div><code style="color:var(--accent)">model=lenovo</code> — model field</div>
@@ -1397,6 +1398,31 @@ svg#cv.pen{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/s
         <div><code style="color:var(--accent)">rack=Rack09</code> — by rack assignment</div>
         <div><code style="color:var(--accent)">previous-mac=40:B0</code> — replaced devices</div>
         <div><code style="color:var(--accent)">xml_change_status=new</code> — newly discovered</div>
+      </div>
+
+      <h3 style="color:var(--accent);font-size:.78rem;margin:0 0 6px;letter-spacing:.05em">RECENCY (SEEN ONLINE)</h3>
+      <div style="background:rgba(0,0,0,.18);padding:8px 12px;border-radius:6px;margin-bottom:14px">
+        <div style="color:var(--muted);margin-bottom:5px">
+          Match by how recently a device was <b>seen online</b>. Uses each device's last-online timestamp.
+        </div>
+        <div><code style="color:var(--accent)">seen=15m</code> — seen online in the last 15 minutes</div>
+        <div><code style="color:var(--accent)">seen=1h</code> — last hour</div>
+        <div><code style="color:var(--accent)">seen=6h</code> — last 6 hours</div>
+        <div><code style="color:var(--accent)">seen=1d</code> — last day</div>
+        <div><code style="color:var(--accent)">seen=1w</code> — last week</div>
+        <div><code style="color:var(--accent)">seen=30s</code> — last 30 seconds</div>
+        <div><code style="color:var(--accent)">seen=15</code> — bare number = minutes (same as <code>seen=15m</code>)</div>
+        <div><code style="color:var(--accent)">seen=never</code> — device has never come online since being tracked</div>
+        <div><code style="color:var(--accent)">!seen=1h</code> — NOT seen within the last hour (stale or offline)</div>
+        <div style="margin-top:6px;color:var(--muted)">
+          <b>Units:</b> <code>s</code> seconds, <code>m</code> minutes (default), <code>h</code> hours, <code>d</code> days, <code>w</code> weeks.
+        </div>
+        <div style="margin-top:6px;color:var(--muted)">
+          <b>Combine with other fields:</b><br>
+          <code style="color:var(--accent)">state=online seen=15m</code> — currently online AND recently observed<br>
+          <code style="color:var(--accent)">type=camera !seen=1h</code> — cameras silent for over an hour<br>
+          <code style="color:var(--accent)">vlan=1088 seen=never</code> — devices in VLAN 1088 that have never come up
+        </div>
       </div>
 
       <h3 style="color:var(--accent);font-size:.78rem;margin:0 0 6px;letter-spacing:.05em">IP RANGES</h3>
