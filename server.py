@@ -3371,6 +3371,66 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._json({"ok": True})
             except Exception as e: self._error(str(e))
 
+        elif self.path == "/api/devices/strip-names":
+            # POST body: {macs:[...], strip:"...", case_insensitive:bool}
+            # For each MAC, remove all occurrences of `strip` from the <name>
+            # element in the XML. Silently skips devices whose name doesn't
+            # contain the substring. Returns per-device results.
+            try:
+                data = json.loads(body)
+                macs = data.get("macs", []) or []
+                strip = str(data.get("strip", "") or "")
+                ci = bool(data.get("case_insensitive", True))
+                by_user = self.headers.get("X-User-Host","") or platform.node()
+                if not strip:
+                    self._json({"ok": False, "error": "Empty strip string"}); return
+                if not macs:
+                    self._json({"ok": False, "error": "No devices selected"}); return
+                xp = xml_path_store[0]
+                if not xp or not Path(xp).exists():
+                    self._json({"ok": False, "error": "XML file not loaded"}); return
+                # Snapshot layout first — cheap insurance for a bulk XML edit
+                create_layout_snapshot(reason="prestrip", by_user=by_user)
+                tree = ET.parse(xp)
+                root = tree.getroot()
+                mac_set = {m.upper().strip() for m in macs if m}
+                results = []
+                changed_count = 0
+                for dev in root.findall("device"):
+                    mac_el = dev.find("mac")
+                    if mac_el is None or not (mac_el.text or "").strip(): continue
+                    mac = mac_el.text.strip().upper()
+                    if mac not in mac_set: continue
+                    name_el = dev.find("name")
+                    if name_el is None or name_el.text is None: continue
+                    old = name_el.text
+                    if ci:
+                        pattern = re.compile(re.escape(strip), re.IGNORECASE)
+                        new = pattern.sub("", old)
+                    else:
+                        new = old.replace(strip, "")
+                    if new != old:
+                        name_el.text = new
+                        results.append({"mac": mac, "old": old, "new": new})
+                        changed_count += 1
+                if changed_count > 0:
+                    tree.write(xp, encoding="utf-8", xml_declaration=True)
+                    try:
+                        new_devs = load_xml(xp)
+                        merge_devices(new_devs)
+                    except Exception as _e: print(f"[strip-names] reload failed: {_e}")
+                    log_admin("bulk-strip-names", by_user, "",
+                              f"stripped '{strip}' from {changed_count}/{len(macs)} devices")
+                self._json({
+                    "ok": True,
+                    "changed": changed_count,
+                    "requested": len(macs),
+                    "skipped": len(macs) - changed_count,
+                    "results": results,
+                })
+            except Exception as e:
+                self._error(str(e))
+
         elif self.path == "/api/snapshot/create":
             # POST — take a manual snapshot right now.
             # Body: {reason: "manual"} (optional)

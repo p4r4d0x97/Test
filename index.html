@@ -1381,6 +1381,10 @@ svg#cv.pen{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/s
         <div><code style="color:var(--accent)">10.93.1</code> — finds anything containing this text in IP, name, or MAC</div>
         <div><code style="color:var(--accent)">printer</code> — substring match (case-insensitive)</div>
         <div><code style="color:var(--accent)">C026302</code> — finds the device with this hostname</div>
+        <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">
+          <code style="color:var(--accent)">all</code> — special keyword: matches every placed device on the map.
+          Combine with bulk selection tools (Ctrl+A after filtering, or the ⋯ menu) to act on the entire inventory.
+        </div>
       </div>
 
       <h3 style="color:var(--accent);font-size:.78rem;margin:0 0 6px;letter-spacing:.05em">FIELD-SPECIFIC FILTERS</h3>
@@ -1459,6 +1463,25 @@ svg#cv.pen{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/s
         <div><code style="color:var(--accent)">switch=192.168.8.10 !status=online</code> — non-online devices on switch X</div>
         <div><code style="color:var(--accent)">ip=10.93.1.10-50 type=pc</code> — PCs in IP range</div>
         <div><code style="color:var(--accent)">previous-mac=.+</code> — all devices that have a previous MAC</div>
+        <div><code style="color:var(--accent)">all</code> — every device on the map (for bulk-across-inventory actions)</div>
+      </div>
+
+      <h3 style="color:var(--accent);font-size:.78rem;margin:0 0 6px;letter-spacing:.05em">BULK ACTIONS ON FILTER RESULTS</h3>
+      <div style="background:rgba(160,96,255,.05);border:1px solid #a060ff;padding:8px 12px;border-radius:6px;margin-bottom:14px;color:var(--muted)">
+        <div style="margin-bottom:5px">
+          After filtering, select devices (Ctrl+click on the map, or use "Select all matching" from the filter menu)
+          and open <b>Bulk Admin</b> (📋 button in toolbar).
+        </div>
+        <div style="margin-top:6px">
+          <b style="color:#a060ff">✂ Strip from name</b> — universal action. Paste text to remove from every selected
+          device's display name (e.g. <code>.corp.local</code>, <code>.domain.example</code>).
+          Devices without the substring are silently skipped. The XML file is updated so all users see the change,
+          and a layout snapshot is taken first for safety.
+        </div>
+        <div style="margin-top:6px">
+          Combined with <code>all</code>: filter <code>all</code> → Ctrl+A to select → Bulk Admin → Strip <code>.corp.local</code>
+          → removes the domain from every device in the inventory.
+        </div>
       </div>
 
       <div style="text-align:center;margin-top:16px;padding:8px;color:var(--muted);font-size:.7rem">
@@ -3339,6 +3362,7 @@ function drawHeatmap(){
 //  SMART FILTER ENGINE
 // ══════════════════════════════════════════════════════════════════
 const CORE_FILTER_FIELDS=[
+  {k:'all',    desc:'Match every device on the map',ex:'all'},
   {k:'name',   desc:'Name contains',              ex:'name=davec'},
   {k:'ip',     desc:'IP contains or exact',       ex:'ip=192.168.1'},
   {k:'ip',     desc:'IP range (inclusive)',        ex:'ip=192.168.1.10-192.168.1.50'},
@@ -3498,6 +3522,11 @@ function parseQuery(raw){
     // No '=' → free-text token, match against name/ip/mac
     if(ei===-1){
       if(!s) return null;
+      // Special keyword: 'all' matches every placed device on the map.
+      // Useful for bulk operations across the whole inventory.
+      if(s.toLowerCase() === 'all'){
+        return {neg, k:'__all__', v:'', rx:null};
+      }
       const hasRegex=/[|^$.*+?()[\]{}\\]/.test(s);
       let rx=null;
       if(hasRegex){ try{ rx=new RegExp(s,'i'); }catch(_){ rx=null; } }
@@ -3672,7 +3701,13 @@ function devVisible(mac){
   if(!customRules.length) return true;
   for(const f of customRules){
     let m=false;
-    if(f.k==='__any__'){
+    if(f.k==='__all__'){
+      // Match every device. Combined with other rules via AND semantics
+      // (all rules must pass), so 'all vlan=1010' still filters to vlan 1010,
+      // but 'all' alone matches everything on the map.
+      m = true;
+    }
+    else if(f.k==='__any__'){
       // Free-text: match against name, ip, and mac
       const hay = `${d.name||''} ${d.ip||''} ${d.mac||''}`.toLowerCase();
       m = f.rx ? f.rx.test(hay) : hay.includes(f.v.toLowerCase());
@@ -8962,6 +8997,47 @@ function openBulkAdmin(){
       'and each has switch+port info populated.','warn'));
   }
 
+  // ── Action: Strip substring from name (universal, no credentials needed) ─
+  // Users pastes a piece of text they want removed from every selected device's
+  // display name — useful for stripping domain suffixes like ".corp.local" or
+  // repeated prefixes. Changes are pushed to the XML on the server so all users
+  // see them; devices without the substring are silently skipped.
+  {
+    const stripBox = document.createElement('div');
+    stripBox.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:11px;'+
+      'background:rgba(160,96,255,.05);border:1px solid #a060ff;border-radius:6px';
+    stripBox.innerHTML = `
+      <div style="font-family:var(--fm);font-size:.7rem;color:#a060ff;letter-spacing:.03em">
+        ✂ STRIP FROM NAME
+      </div>
+      <div style="font-size:.66rem;color:var(--muted);line-height:1.4">
+        Paste text to remove from each selected device's name.
+        Common use: strip domain suffix (e.g. <code>.corp.local</code>).
+        Devices without this text are silently skipped. Change is saved to XML.
+      </div>
+      <input type="text" id="bulk-strip-input" class="sinput"
+        placeholder=".corp.local"
+        style="width:100%;padding:7px 10px;font-family:var(--fm);font-size:.75rem"
+        autocomplete="off">
+      <div style="display:flex;gap:8px;align-items:center">
+        <label style="display:flex;align-items:center;gap:6px;font-size:.66rem;color:var(--muted);cursor:pointer">
+          <input type="checkbox" id="bulk-strip-ci" checked
+            style="accent-color:#a060ff;width:13px;height:13px">
+          Case-insensitive
+        </label>
+        <button type="button" id="bulk-strip-btn" class="abtn primary"
+          style="font-size:.72rem;padding:6px 14px;cursor:pointer;margin-left:auto;
+          background:rgba(160,96,255,.15);border-color:#a060ff;color:#a060ff">
+          ✂ Preview & apply
+        </button>
+      </div>
+      <div id="bulk-strip-out" style="display:none;font-size:.66rem;padding:8px 10px;
+        background:rgba(0,0,0,.3);border-radius:4px;font-family:var(--fm);
+        max-height:200px;overflow-y:auto"></div>`;
+    body.appendChild(stripBox);
+    stripBox.querySelector('#bulk-strip-btn').onclick = ()=>runBulkStripName(devs);
+  }
+
   // Credentials box (built once, shared by all SSH and Windows actions)
   let credBox = null;
   if(commonCaps.has('poe-restart') || commonCaps.has('port-shutdown')
@@ -9215,6 +9291,96 @@ function showBulkOut(text, kind){
   out.textContent=text;
   // Scroll the modal body so the output is visible
   setTimeout(()=>{ out.scrollIntoView({behavior:'smooth',block:'end'}); }, 50);
+}
+
+// Bulk strip substring from device names. Universal action — works on any
+// selected devices regardless of type/VLAN. Silently skips devices whose
+// name doesn't contain the substring. Modifies the XML file directly.
+async function runBulkStripName(devs){
+  const inp = document.getElementById('bulk-strip-input');
+  const ci = document.getElementById('bulk-strip-ci').checked;
+  const btn = document.getElementById('bulk-strip-btn');
+  const out = document.getElementById('bulk-strip-out');
+  const strip = inp.value;
+  if(!strip){
+    out.style.display=''; out.style.color='var(--no_info)';
+    out.textContent = 'Enter the text to strip first.';
+    return;
+  }
+  // Client-side preview — which devices would actually change
+  const willChange = devs.filter(d=>{
+    const n = d.name || '';
+    return ci ? n.toLowerCase().includes(strip.toLowerCase()) : n.includes(strip);
+  });
+  const willSkip = devs.length - willChange.length;
+  if(!willChange.length){
+    out.style.display=''; out.style.color='var(--muted)';
+    out.textContent = 'No selected devices contain "' + strip + '". Nothing to do.';
+    return;
+  }
+  const preview = willChange.slice(0, 5).map(d=>{
+    let newName;
+    if(ci){
+      const rx = new RegExp(strip.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi');
+      newName = (d.name||'').replace(rx, '');
+    } else {
+      newName = (d.name||'').split(strip).join('');
+    }
+    return '<div style="padding:2px 0"><span style="color:var(--muted)">'+
+      escapeHtml(d.name||'')+'</span> → <b style="color:var(--online)">'+
+      escapeHtml(newName)+'</b></div>';
+  }).join('');
+  const confirmMsg = 'Strip "'+strip+'" from '+willChange.length+
+    ' device name'+(willChange.length>1?'s':'')+'?\n\n' +
+    (willSkip>0 ? '('+willSkip+' selected device'+(willSkip>1?'s do':' does')+
+      ' not contain this text — will be silently skipped)\n\n' : '') +
+    'The XML file will be modified. A layout snapshot is taken first.\n\nProceed?';
+  if(!confirm(confirmMsg)) return;
+  const origLabel = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ Stripping…';
+  out.style.display=''; out.style.color='var(--muted)';
+  out.innerHTML = '<div style="margin-bottom:6px">Preview (first 5):</div>'+
+    preview+'<div style="margin-top:6px">Applying…</div>';
+  try {
+    const r = await fetch('/api/devices/strip-names', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        macs: willChange.map(d=>d.mac),
+        strip,
+        case_insensitive: ci,
+      })
+    });
+    const j = await r.json();
+    if(!j.ok){
+      out.style.color='var(--offline)';
+      out.textContent = '✗ ' + (j.error||'Failed');
+      return;
+    }
+    // Update local allDevs so map re-renders with new names immediately
+    (j.results||[]).forEach(row=>{
+      const d = allDevs[row.mac];
+      if(d) d.name = row.new;
+    });
+    renderAll();
+    if(typeof renderSidebar==='function') renderSidebar();
+    const lines = (j.results||[]).map(row=>
+      '<div style="padding:2px 0;font-size:.62rem">'+
+      '<span style="color:var(--muted)">'+escapeHtml(row.old)+'</span>'+
+      ' → <b style="color:var(--online)">'+escapeHtml(row.new)+'</b></div>').join('');
+    out.style.color='var(--text)';
+    out.innerHTML = '<div style="margin-bottom:6px;color:var(--online)">'+
+      '✓ Stripped from <b>'+j.changed+'</b> of '+j.requested+' devices'+
+      (j.skipped>0 ? ' ('+j.skipped+' silently skipped — no match)' : '')+
+      '</div>'+lines;
+    showSyncToast('Stripped "'+strip+'" from '+j.changed+' devices', 'new');
+    setTimeout(()=>{ if(typeof syncDevices==='function') syncDevices(); }, 1500);
+  } catch(e){
+    out.style.color='var(--offline)';
+    out.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origLabel;
+  }
 }
 
 async function runBulkPortShutdown(devs, credBox, btn){
@@ -10879,6 +11045,13 @@ function renderMappingTab(body){
     'Devices in these VLANs get the "🔌 Restart PoE port" action in the Admin Tools '+
     'and Bulk Admin modals — power-cycles the switch port they\'re plugged into. '+
     'Only include VLANs where devices are physically powered via PoE (APs, cameras, IP phones).'));
+  body.appendChild(_cfgList('Strip from device names (during scan)', 'cfg-nm-strip',
+    nm.strip_from_names,
+    '.corp.local, .domain.example, DESKTOP-',
+    'Substrings to remove from every hostname during a network scan. '+
+    'Useful for cleaning domain suffixes appended by DNS resolution. '+
+    'Case-insensitive. Comma-separated. Applied automatically each scan — '+
+    'no manual bulk-strip needed. Devices whose names don\'t contain any listed substring are silently skipped.'));
 }
 
 // ── COLLECTORS TAB ──────────────────────────────────────────────
@@ -11081,6 +11254,8 @@ function _readSiteCfgTab(){
     _siteCfg.wifi_vlans = g('cfg-wifi-vlans').value.split(',').map(s=>s.trim()).filter(Boolean);
     if(g('cfg-nm-poe'))
       _siteCfg.netmap.poe_vlans = g('cfg-nm-poe').value.split(',').map(s=>s.trim()).filter(Boolean);
+    if(g('cfg-nm-strip'))
+      _siteCfg.netmap.strip_from_names = g('cfg-nm-strip').value.split(',').map(s=>s.trim()).filter(Boolean);
   }
   // COLLECTORS
   if(g('cfg-winrm-vlans')){

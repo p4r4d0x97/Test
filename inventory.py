@@ -130,6 +130,8 @@ DEFAULT_CONFIG = {
         "snapshot_enabled":     True,        # take daily layout snapshots
         "snapshot_time":     "03:00",        # HH:MM 24h local time
         "snapshot_max":           30,        # keep this many snapshots (rotating)
+        "strip_from_names":       [],        # substrings to remove from names during scan (e.g. [".corp.local"])
+        "strip_case_insensitive": True,      # case-insensitive strip (default)
     },
 }
 
@@ -330,6 +332,23 @@ def resolve_name(device: RawDevice, timeout: int = 1) -> None:
         device.name = device.ip
 
 
+def strip_from_name(name: str, patterns: list, case_insensitive: bool = True) -> str:
+    """Remove every occurrence of each pattern from a device name.
+    Silently returns the name unchanged if no patterns match. Case-insensitive
+    by default so ".Corp.Local" strips the same as ".corp.local"."""
+    if not name or not patterns: return name
+    result = name
+    for p in patterns:
+        p = str(p or "").strip()
+        if not p: continue
+        if case_insensitive:
+            import re as _re
+            result = _re.compile(_re.escape(p), _re.IGNORECASE).sub("", result)
+        else:
+            result = result.replace(p, "")
+    return result.strip()
+
+
 def collect_serial_and_second_nic(cfg: dict, device: RawDevice) -> None:
     """Optional WinRM collector. Skipped entirely if config is empty."""
     winrm = cfg.get("winrm", {})
@@ -471,6 +490,23 @@ def run_collection(cfg: dict, username: str, password: str, port: int,
     ping_to = int(cfg.get("timeouts", {}).get("ping", 1))
     with ThreadPoolExecutor(max_workers=cfg["workers"]["general"]) as pool:
         pool.map(lambda d: resolve_name(d, timeout=ping_to), new_devices)
+
+    # Apply name-stripping — configurable list of substrings to remove
+    # from every discovered hostname before writing to XML. Typical use:
+    # strip domain suffixes like ".corp.local" that hostname resolution
+    # appends but users don't want cluttering the map.
+    strip_list = cfg.get("netmap", {}).get("strip_from_names", []) or []
+    if strip_list:
+        strip_ci = bool(cfg.get("netmap", {}).get("strip_case_insensitive", True))
+        stripped_count = 0
+        for d in new_devices:
+            if not d.name: continue
+            new_name = strip_from_name(d.name, strip_list, case_insensitive=strip_ci)
+            if new_name != d.name:
+                d.name = new_name
+                stripped_count += 1
+        if stripped_count:
+            _p(f"[✂] Stripped substrings from {stripped_count} name(s)")
 
     winrm_cfg = cfg.get("winrm", {})
     if winrm_cfg.get("vlan_whitelist") and winrm_cfg.get("name_prefixes"):
