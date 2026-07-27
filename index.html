@@ -10301,10 +10301,12 @@ async function createSnapshotNow(){
 
 async function restoreSnapshot(filename){
   if(!_settingsToken){
-    showSyncToast('Restore requires settings password — opening prompt', 'none');
+    // Ask for password, then re-run this function after successful login.
+    _settingsLoginCb = () => restoreSnapshot(filename);
     document.getElementById('settingslogin-pw').value = '';
     document.getElementById('settingslogin-msg').textContent =
       'Enter password to authorize snapshot restore';
+    document.getElementById('settingslogin-msg').style.color = 'var(--muted)';
     openOv('ov-settingslogin');
     setTimeout(()=>document.getElementById('settingslogin-pw').focus(), 100);
     return;
@@ -10340,7 +10342,12 @@ async function restoreSnapshot(filename){
 
 async function deleteSnapshot(filename){
   if(!_settingsToken){
-    showSyncToast('Delete requires settings password', 'none');
+    // Ask for password, then re-run this function after login.
+    _settingsLoginCb = () => deleteSnapshot(filename);
+    document.getElementById('settingslogin-pw').value = '';
+    document.getElementById('settingslogin-msg').textContent =
+      'Enter password to authorize snapshot delete';
+    document.getElementById('settingslogin-msg').style.color = 'var(--muted)';
     openOv('ov-settingslogin');
     setTimeout(()=>document.getElementById('settingslogin-pw').focus(), 100);
     return;
@@ -10418,11 +10425,23 @@ function _fmtLastTouched(mac){
   else if(age < 86400) when = Math.floor(age/3600) + 'h ago';
   else if(age < 30*86400) when = Math.floor(age/86400) + 'd ago';
   else when = Math.floor(age/(30*86400)) + 'mo ago';
-  const verb = t.event.includes('add') ? 'added' :
-               t.event.includes('remove') ? 'removed' :
-               t.event.includes('rename') ? 'renamed' :
-               t.event.includes('resize') ? 'resized' : 'moved';
-  return `${verb} by ${t.by} · ${when}`;
+  const verbMap = {
+    'placed':       'placed',
+    'moved':        'moved',
+    'unplaced':     'removed',
+    'display-name': 'renamed',
+    'resized':      'resized',
+    'note':         'noted',
+    'manual-add':   'added',
+    'scan-manual-add': 'added via scan',
+    'scan-run':     'refreshed by scan',
+    'room-added':   'added',
+    'room-deleted': 'removed',
+    'rack-added':   'added',
+    'rack-deleted': 'removed',
+  };
+  const verb = verbMap[t.event] || 'touched';
+  return verb + ' by ' + t.by + ' · ' + when;
 }
 
 // Populate the toolbar identity badge (who am I + admin status).
@@ -10573,6 +10592,11 @@ async function openSiteSettings(){
   }
 }
 
+// Optional callback fired after a successful settings login.
+// Set by callers (restore/delete snapshot, etc.) that want the token but
+// NOT the settings modal to open afterward.
+let _settingsLoginCb = null;
+
 async function submitSettingsLogin(){
   const pw = document.getElementById('settingslogin-pw').value;
   const msg = document.getElementById('settingslogin-msg');
@@ -10593,8 +10617,15 @@ async function submitSettingsLogin(){
     if(!j.ok){ msg.textContent = 'Login failed'; return; }
     _settingsToken = j.token;
     closeOv('ov-settingslogin');
-    // Now open the actual settings modal
-    openSiteSettings();
+    // If a caller registered a callback, run it and DON'T open settings.
+    // Otherwise, default behavior: open the settings modal.
+    if(typeof _settingsLoginCb === 'function'){
+      const cb = _settingsLoginCb;
+      _settingsLoginCb = null;    // one-shot
+      try { cb(); } catch(e){ console.error('[settings-login cb]', e); }
+    } else {
+      openSiteSettings();
+    }
   } catch(e){
     msg.textContent = 'Login error: ' + e.message;
     msg.style.color = 'var(--offline)';

@@ -2342,15 +2342,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # (only usernames + timestamps, not command details).
             try:
                 entries = load_admin_log()
-                # events we care about — position/layout mutations
+                # events we care about — position/layout mutations.
+                # Names must match those actually emitted by _diff_layouts()
+                # and other places that call log_admin().
                 keep_events = {
-                    "device-add", "device-move", "device-remove",
-                    "room-add", "room-move", "room-resize", "room-remove", "room-rename",
-                    "rack-add", "rack-move", "rack-remove", "rack-rename",
-                    "box-add", "box-move", "box-remove", "box-rename",
-                    "drawing-add", "drawing-remove",
-                    "annotation-add", "annotation-move", "annotation-remove",
-                    "photo-marker-add", "photo-marker-remove",
+                    # device layout events (from _diff_layouts)
+                    "placed", "moved", "unplaced", "display-name", "resized", "note",
+                    # room events
+                    "room-added", "room-deleted",
+                    # rack events
+                    "rack-added", "rack-deleted",
+                    # manual add via ➕
+                    "manual-add",
+                    # scan events (also touches devices)
+                    "scan-run", "scan-manual-add",
                 }
                 latest = {}   # target -> {by, ts, event}
                 for e in entries:   # newest first from load_admin_log
@@ -3485,10 +3490,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self._cors(); self.end_headers(); self.wfile.write(data)
 
     def _error(self, msg):
-        data = json.dumps({"error":msg}).encode()
-        self.send_response(400)
-        self.send_header("Content-Type","application/json")
-        self._cors(); self.end_headers(); self.wfile.write(data)
+        # If the client already closed the connection, don't spam the console
+        # with SSL/pipe errors when we try to write the response.
+        try:
+            data = json.dumps({"error":msg}).encode()
+            self.send_response(400)
+            self.send_header("Content-Type","application/json")
+            self._cors(); self.end_headers(); self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError,
+                ConnectionAbortedError, OSError) as _e:
+            pass
+        except Exception as _e:
+            # Any SSL layer error — client disconnected mid-response
+            if 'SSL' in type(_e).__name__ or 'ssl' in str(_e).lower():
+                pass
+            else:
+                raise
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin","*")
@@ -3596,6 +3613,23 @@ def main():
     class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         daemon_threads = True
         allow_reuse_address = True
+
+        def handle_error(self, request, client_address):
+            """Silence noisy but harmless client-disconnect exceptions.
+            Real errors (bugs, crashes) still print with their traceback."""
+            import traceback, io
+            exc_type, exc_val, _ = sys.exc_info()
+            if exc_type is None: return
+            name = exc_type.__name__
+            msg = str(exc_val)
+            # These all mean "browser hung up mid-response" — cosmetic noise.
+            if name in ("BrokenPipeError", "ConnectionResetError",
+                        "ConnectionAbortedError", "SSLEOFError"):
+                return
+            if "SSL" in name or "BAD_LENGTH" in msg or "EOF occurred" in msg:
+                return
+            # Real error — print it
+            super().handle_error(request, client_address)
 
     # Apply per-plant runtime settings (VLAN pause, timeouts, caps, etc.)
     # so they take effect BEFORE any request is served.
