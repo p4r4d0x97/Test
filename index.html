@@ -1217,6 +1217,27 @@ svg#cv.pen{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/s
   </div>
 </div>
 
+<!-- ══ COMMAND OUTPUT MODAL — SSH/PowerShell results across N devices ══ -->
+<div class="ov" id="ov-cmdout" onclick="if(event.target===this)closeOv('ov-cmdout')">
+  <div class="modal" style="width:min(900px,94vw);max-height:88vh">
+    <div class="mh">
+      <div>
+        <div class="mt" id="cmdout-title">COMMAND OUTPUT</div>
+        <div class="ms" id="cmdout-sub">Results per device</div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button type="button" id="cmdout-copyall"
+          style="background:rgba(0,200,255,.10);border:1px solid var(--accent);
+          color:var(--accent);padding:5px 12px;border-radius:5px;cursor:pointer;
+          font-size:.68rem;font-family:var(--fm)">📋 COPY ALL</button>
+        <button type="button" class="mcl" onclick="closeOv('ov-cmdout')">✕</button>
+      </div>
+    </div>
+    <div class="mb" id="cmdout-body" style="display:flex;flex-direction:column;gap:11px;
+      padding:14px;max-height:75vh;overflow-y:auto"></div>
+  </div>
+</div>
+
 <!-- ══ TEMPLATE RUN CONFIRM MODAL ════════════════════════════ -->
 <div class="ov" id="ov-tmplrun" onclick="if(event.target===this)closeOv('ov-tmplrun')">
   <div class="modal" style="width:560px">
@@ -8207,6 +8228,12 @@ function renderTmplRunModal(t, targets){
   document.getElementById('tmplrun-sub').textContent =
     `${t.name} · ${targets.length} target${targets.length!==1?'s':''}`;
   body.innerHTML = '';
+  // Reset the Run button state (may still say "Run again" from a prior run)
+  const goBtn = document.getElementById('tmplrun-go');
+  if(goBtn){
+    goBtn.disabled = false;
+    goBtn.textContent = '▶ Run now';
+  }
 
   // Warning banner
   const warn = document.createElement('div');
@@ -8297,34 +8324,79 @@ async function confirmAndRunTemplate(){
     _sessionCreds[t.type] = { user:'', pass:'', remember: false };
   }
   const targets = _tmplPendingTargets;
-  closeOv('ov-tmplrun');
-  showSyncToast(`Running ${t.name} on ${targets.length} target(s)…`, 'none');
+  // Keep the modal open. Replace the run button with a running indicator,
+  // append a live output panel that streams per-device results.
+  const goBtn = document.getElementById('tmplrun-go');
+  const modalBody = document.getElementById('tmplrun-body');
+  goBtn.disabled = true;
+  goBtn.textContent = '⏳ Running…';
+  // Live output panel appended to the modal body
+  const out = document.createElement('div');
+  out.id = 'tmplrun-out';
+  out.style.cssText = 'padding:10px 12px;background:rgba(0,0,0,.35);border-radius:5px;'+
+    'font-family:var(--fm);font-size:.68rem;color:var(--muted);white-space:pre-wrap;'+
+    'max-height:280px;overflow-y:auto;line-height:1.4';
+  out.textContent = `Running "${t.name}" on ${targets.length} target(s)…\n\n`;
+  modalBody.appendChild(out);
+  const appendOut = (line) => {
+    out.textContent += line;
+    out.scrollTop = out.scrollHeight;
+  };
   try {
     if(t.type === 'ssh'){
-      // Existing SSH bulk endpoint: expects switch_ips + newline-joined commands
       const ips = targets.map(m => allDevs[m]?.ip).filter(Boolean);
+      appendOut('Running ' + t.commands.length + ' command(s) sequentially per switch…\n');
+      appendOut('Commands:\n');
+      t.commands.forEach((c,i)=> appendOut('  ' + (i+1) + '. ' + c + '\n'));
+      appendOut('\n──────────────────────\n');
       const r = await fetch('/api/admin/run-switch-cmd', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
           switch_ips: ips,
           commands: t.commands.join('\n'),
           user, pass,
-          template_name: t.name   // for audit context
+          template_name: t.name
         })
       });
       const j = await r.json();
-      if(!j.ok){ showSyncToast('SSH template failed: ' + (j.error||'?'), 'removed'); return; }
-      showSyncToast(`Template done: ${j.ok_count||0} ok, ${(j.results||[]).length - (j.ok_count||0)} failed`,
-        (j.ok_count||0) === (j.results||[]).length ? 'new' : 'none');
+      if(!j.ok){
+        appendOut('\n✗ FAILED: ' + (j.error || '?') + '\n');
+        goBtn.disabled = false; goBtn.textContent = '▶ Run again';
+        return;
+      }
+      // Audit-log every switch result
+      (j.results||[]).forEach(row=>{
+        const dev = targets.find(m => allDevs[m]?.ip === row.switch_ip);
+        if(dev) logAction(dev, 'ssh-template', user,
+          row.ok ? 'ok' : 'fail', ('template=' + t.name + ' ' + (row.error||'')).trim());
+      });
+      const ok = j.ok_count || 0;
+      const fail = (j.results||[]).length - ok;
+      appendOut('\n──────────────────────\nDONE: ' + ok + ' ok · ' + fail + ' failed\n');
+      appendOut('Opening detailed output modal…\n');
+      // Show detailed output in the dedicated modal
+      const items = (j.results||[]).map(r => ({
+        label: r.switch_ip,
+        ok: r.ok,
+        output: r.output || '',
+        error: r.error || '',
+      }));
+      showCmdOutputModal(
+        'TEMPLATE: ' + t.name,
+        ips.length + ' switch' + (ips.length!==1?'es':'') +
+        ' · ' + t.commands.length + ' command' + (t.commands.length!==1?'s':''),
+        items
+      );
+      showSyncToast('Template "'+t.name+'": '+ok+' ok, '+fail+' failed',
+        fail === 0 ? 'new' : 'none');
     } else {
-      // Windows PC bulk command — existing endpoint takes ONE cmd + targets as objects.
-      // For a template with N lines we join them with ' ; ' (PowerShell separator) so
-      // the whole sequence runs in one Invoke-Command call.
       const winTargets = targets.map(m => ({
         mac: m, ip: allDevs[m]?.ip || '',
         name: allDevs[m]?.name || ''
       }));
       const joined = t.commands.join(' ; ');
+      appendOut('Running ' + t.commands.length + ' command(s) on each PC in parallel…\n');
+      appendOut('Joined PowerShell:\n  ' + joined + '\n\n──────────────────────\n');
       const r = await fetch('/api/admin/bulk-cmd', {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
@@ -8335,16 +8407,41 @@ async function confirmAndRunTemplate(){
         })
       });
       const j = await r.json();
-      if(!j.ok){ showSyncToast('Windows template failed: ' + (j.error||'?'), 'removed'); return; }
-      const failCount = (j.results||[]).length - (j.ok_count||0);
-      showSyncToast(`Template done: ${j.ok_count||0} ok, ${failCount} failed`,
-        failCount === 0 ? 'new' : 'none');
+      if(!j.ok){
+        appendOut('\n✗ FAILED: ' + (j.error || '?') + '\n');
+        goBtn.disabled = false; goBtn.textContent = '▶ Run again';
+        return;
+      }
+      (j.results||[]).forEach(row=>{
+        if(row.mac) logAction(row.mac, 'windows-template', user,
+          row.ok ? 'ok' : 'fail', ('template=' + t.name + ' ' + (row.error||'')).trim());
+      });
+      const ok = j.ok_count || 0;
+      const fail = (j.results||[]).length - ok;
+      appendOut('\n──────────────────────\nDONE: ' + ok + ' ok · ' + fail + ' failed\n');
+      appendOut('Opening detailed output modal…\n');
+      const items = (j.results||[]).map(r => ({
+        label: r.name || r.ip || r.mac || '?',
+        ok: r.ok,
+        output: r.output || '',
+        error: r.error || '',
+      }));
+      showCmdOutputModal(
+        'TEMPLATE: ' + t.name,
+        winTargets.length + ' PC' + (winTargets.length!==1?'s':'') +
+        ' · ' + t.commands.length + ' command' + (t.commands.length!==1?'s':''),
+        items
+      );
+      showSyncToast('Template "'+t.name+'": '+ok+' ok, '+fail+' failed',
+        fail === 0 ? 'new' : 'none');
     }
   } catch(e){
+    appendOut(`\n✗ NETWORK ERROR: ${e.message}\n`);
     showSyncToast('Template run error: ' + e.message, 'removed');
+  } finally {
+    goBtn.disabled = false;
+    goBtn.textContent = '▶ Run again';
   }
-  _tmplPendingRun = null;
-  _tmplPendingTargets = [];
 }
 
 
@@ -9702,12 +9799,20 @@ async function runBulkPcCmd(devs, cmd, credBox, btn){
       log+='✗ '+(j.error||'failed')+'\n';
       showBulkOut(log,'err'); setBtnBusy(btn,false); return;
     }
-    log+=`\n  ✓ ${j.ok_count} succeeded · ✗ ${j.fail_count} failed\n`;
+    log+='\n  ✓ '+j.ok_count+' succeeded · ✗ '+j.fail_count+' failed. Output shown in modal.\n';
+    // Show full per-PC output in the dedicated modal
+    const items = (j.results||[]).map(r => ({
+      label: r.name || r.ip || r.mac || '?',
+      ok: r.ok,
+      output: r.output || '',
+      error: r.error || '',
+    }));
+    showCmdOutputModal(
+      'WINDOWS COMMAND OUTPUT',
+      pre.online_count + ' PC' + (pre.online_count!==1?'s':'') + ' · ' + cmd,
+      items
+    );
     j.results.forEach(r=>{
-      const ic = r.ok ? '✓' : '✗';
-      log += `\n${ic} ${r.name||r.mac}\n`;
-      if(r.output) log += '   '+r.output.replace(/\n/g,'\n   ').slice(0,400)+'\n';
-      if(r.error)  log += '   ERROR: '+r.error+'\n';
       logAction(r.mac, 'run-cmd', user, r.ok?'ok':'fail', cmd);
     });
     showBulkOut(log, j.fail_count?'warn':'ok');
@@ -9757,9 +9862,28 @@ async function runSwitchCommands(switches, cmds, credBox, btn, outputParent){
       else showBulkOut(errMsg,'err');
       setBtnBusy(btn,false); return;
     }
-    // Build a rich output with copy buttons per switch
-    const outDiv = outputParent ? getOrCreateInlineOut(outputParent) : document.getElementById('bulk-out');
-    renderSwitchResultsInto(outDiv, j);
+    // Show results in the dedicated command output modal — a proper big
+    // panel with per-device copy buttons, instead of a cramped inline area.
+    const items = (j.results||[]).map(r => ({
+      label: r.switch_ip,
+      ok: r.ok,
+      output: r.output || '',
+      error: r.error || '',
+    }));
+    const cmdLines = cmds.split('\n').filter(l => l.trim()).length;
+    showCmdOutputModal(
+      'SSH COMMAND OUTPUT',
+      switchIps.length + ' switch' + (switchIps.length!==1?'es':'') +
+      ' · ' + cmdLines + ' command' + (cmdLines!==1?'s':''),
+      items
+    );
+    // Also drop a brief summary into the inline area for the caller (bulk admin
+    // still gets a hint that the run happened).
+    const summaryLine = 'Done — ' + (j.ok_count||0) + ' ok · ' +
+      (j.fail_count||0) + ' failed. Output shown in modal.';
+    if(outputParent) showOutputInline(outputParent, summaryLine,
+      j.fail_count ? 'warn' : 'ok');
+    else showBulkOut(summaryLine, j.fail_count ? 'warn' : 'ok');
   } catch(e){
     const msg='✗ Network error: '+e.message;
     if(outputParent) showOutputInline(outputParent, msg, 'err');
@@ -10050,6 +10174,103 @@ function showBulkSwitchResults(j, cmds){
   if(!out) return;
   out.style.display='';
   renderSwitchResultsInto(out, j);
+}
+
+// Open the dedicated command output modal with results across devices.
+// Used by both custom SSH commands and template runs so users see a full
+// per-device output panel with copy buttons — instead of a cramped inline
+// area inside the caller's modal.
+//   title:    headline (e.g. "SSH command output" or "Template: <name>")
+//   subtitle: small text under the title (e.g. "3 switches · 5 commands")
+//   items:    [{label, ok, error, output}]
+// Each item renders as a collapsible card with its own COPY button.
+function showCmdOutputModal(title, subtitle, items){
+  document.getElementById('cmdout-title').textContent = title || 'COMMAND OUTPUT';
+  document.getElementById('cmdout-sub').textContent = subtitle || '';
+  const body = document.getElementById('cmdout-body');
+  body.innerHTML = '';
+
+  const okCount = items.filter(i=>i.ok).length;
+  const failCount = items.length - okCount;
+
+  const summary = document.createElement('div');
+  summary.style.cssText = 'display:flex;gap:12px;padding:9px 12px;'+
+    'background:rgba(0,0,0,.25);border-radius:5px;font-size:.72rem';
+  summary.innerHTML =
+    '<span><b style="color:var(--online)">'+okCount+'</b> succeeded</span>'+
+    '<span><b style="color:var(--offline)">'+failCount+'</b> failed</span>'+
+    '<span style="color:var(--muted);margin-left:auto">'+items.length+
+    ' target'+(items.length!==1?'s':'')+'</span>';
+  body.appendChild(summary);
+
+  items.forEach(item=>{
+    const box = document.createElement('div');
+    box.style.cssText = 'border:1px solid var(--border);border-radius:6px;overflow:hidden';
+
+    const hdr = document.createElement('div');
+    hdr.style.cssText = 'display:flex;align-items:center;gap:10px;padding:7px 12px;'+
+      'background:'+(item.ok?'rgba(32,212,104,.10)':'rgba(240,56,88,.10)')+';'+
+      'border-bottom:1px solid var(--border);font-size:.74rem;cursor:pointer';
+    const ic = item.ok ? '✓' : '✗';
+    hdr.innerHTML =
+      '<span style="color:'+(item.ok?'var(--online)':'var(--offline)')+';font-weight:bold">'+ic+'</span>'+
+      '<span style="flex:1;font-family:var(--fm);color:var(--text)">'+escapeHtml(item.label||'?')+'</span>'+
+      '<span style="color:var(--muted);font-size:.62rem">'+(item.ok?'OK':'FAIL')+'</span>';
+
+    if(item.output || item.error){
+      const copyBtn = document.createElement('button');
+      copyBtn.type='button';
+      copyBtn.style.cssText='background:rgba(0,200,255,.10);border:1px solid var(--accent);'+
+        'color:var(--accent);padding:3px 9px;border-radius:4px;cursor:pointer;'+
+        'font-size:.62rem;font-family:var(--fm);flex-shrink:0';
+      copyBtn.textContent='📋 COPY';
+      copyBtn.onclick = async (e)=>{
+        e.preventDefault(); e.stopPropagation();
+        const text = item.output || item.error || '';
+        try {
+          await navigator.clipboard.writeText(text);
+          copyBtn.textContent='✓ COPIED';
+          setTimeout(()=>{ copyBtn.textContent='📋 COPY'; }, 1500);
+        } catch(_){ showSyncToast('Copy failed','none'); }
+      };
+      hdr.appendChild(copyBtn);
+    }
+
+    const output = document.createElement('pre');
+    output.style.cssText = 'margin:0;padding:10px 12px;background:rgba(0,0,0,.35);'+
+      'font-family:var(--fm);font-size:.7rem;color:var(--muted);line-height:1.5;'+
+      'white-space:pre-wrap;word-break:break-word;max-height:400px;overflow-y:auto';
+    if(item.error){
+      output.innerHTML = '<span style="color:var(--offline)">ERROR: '+escapeHtml(item.error)+'</span>' +
+        (item.output ? '\n\n' + escapeHtml(item.output) : '');
+    } else {
+      output.textContent = item.output || '(no output)';
+    }
+    hdr.onclick = (e)=>{
+      if(e.target.tagName === 'BUTTON') return;
+      output.style.display = output.style.display === 'none' ? '' : 'none';
+    };
+    box.appendChild(hdr);
+    box.appendChild(output);
+    body.appendChild(box);
+  });
+
+  document.getElementById('cmdout-copyall').onclick = async ()=>{
+    const parts = items.map(i => {
+      const status = i.ok ? 'OK' : 'FAIL';
+      const body = i.error ? 'ERROR: '+i.error+'\n'+(i.output||'') : (i.output||'');
+      return '['+status+'] '+(i.label||'?')+'\n'+('-'.repeat(50))+'\n'+body+'\n';
+    });
+    try {
+      await navigator.clipboard.writeText(parts.join('\n'));
+      const b = document.getElementById('cmdout-copyall');
+      const orig = b.textContent;
+      b.textContent = '✓ COPIED';
+      setTimeout(()=>{ b.textContent = orig; }, 1500);
+    } catch(_){ showSyncToast('Copy failed','none'); }
+  };
+
+  openOv('ov-cmdout');
 }
 
 // Render switch results into any output div (bulk or single-switch admin)
