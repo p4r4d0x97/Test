@@ -1217,6 +1217,30 @@ svg#cv.pen{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/s
   </div>
 </div>
 
+<!-- ══ SINGLE-DEVICE OUTPUT ZOOM MODAL ═══════════════════════ -->
+<!-- Opens when user clicks 🔍 next to a device row in the command output modal.
+     Shows one device's full output at maximum size for easy reading. -->
+<div class="ov" id="ov-cmdoutzoom" onclick="if(event.target===this)closeOv('ov-cmdoutzoom')">
+  <div class="modal" style="width:min(1100px,96vw);max-height:92vh">
+    <div class="mh">
+      <div>
+        <div class="mt" id="cmdoutzoom-title">DEVICE OUTPUT</div>
+        <div class="ms" id="cmdoutzoom-sub"></div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button type="button" id="cmdoutzoom-copy"
+          style="background:rgba(0,200,255,.10);border:1px solid var(--accent);
+          color:var(--accent);padding:5px 12px;border-radius:5px;cursor:pointer;
+          font-size:.68rem;font-family:var(--fm)">📋 COPY</button>
+        <button type="button" class="mcl" onclick="closeOv('ov-cmdoutzoom')">✕</button>
+      </div>
+    </div>
+    <div id="cmdoutzoom-body" style="padding:14px;max-height:82vh;overflow-y:auto;
+      font-family:var(--fm);font-size:.78rem;color:var(--text);line-height:1.55;
+      white-space:pre-wrap;word-break:break-word;background:rgba(0,0,0,.4)"></div>
+  </div>
+</div>
+
 <!-- ══ COMMAND OUTPUT MODAL — SSH/PowerShell results across N devices ══ -->
 <div class="ov" id="ov-cmdout" onclick="if(event.target===this)closeOv('ov-cmdout')">
   <div class="modal" style="width:min(900px,94vw);max-height:88vh">
@@ -4036,6 +4060,7 @@ function openDevPopup(mac){
 // ══════════════════════════════════════════════════════════════════
 function openAdminPanel(mac){
   const d=allDevs[mac]; if(!d) return;
+  window._currentAdminMac = mac;   // used by beginRunTemplate to auto-pick target
   const vlan=String(d.vlan||'');
   const name=(d.name||'').toUpperCase();
   const dispName=layout.devices[mac]?.displayName||d.name;
@@ -4096,6 +4121,14 @@ function openAdminPanel(mac){
     grid.appendChild(mkBtn('📂 Open C$ share','primary',b=>runOpenShare(d,credBox,b)));
     grid.appendChild(mkBtn('▶ Run command…','primary',  b=>runCustomCmd(d,credBox,b)));
     body.appendChild(grid);
+
+    // ── Run a saved Windows template on this PC ────────────────
+    const tsep=document.createElement('div');
+    tsep.style.cssText='margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);'+
+      'font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em';
+    tsep.textContent='Run saved Windows template';
+    body.appendChild(tsep);
+    _renderSingleDeviceTemplatePicker(body, d, 'windows', credBox);
   }
   // ── Switches (any switch device) ─────────────────────────────────
   else if(d.type==='switch'){
@@ -4158,6 +4191,16 @@ function openAdminPanel(mac){
       runSwitchCommands([d], cmds, credBox, runCmdBtn, body);
     });
     body.appendChild(runCmdBtn);
+
+    // ── Run an SSH template on this switch ────────────────────
+    // Template picker gives quick access without needing to Ctrl+select
+    // the switch first and open Bulk Admin.
+    const tsep=document.createElement('div');
+    tsep.style.cssText='margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);'+
+      'font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em';
+    tsep.textContent='Run saved SSH template';
+    body.appendChild(tsep);
+    _renderSingleDeviceTemplatePicker(body, d, 'ssh', credBox);
   }
 
   // ── Port shutdown (VLANs 1088, 1021-1024, 1028) ────────────────
@@ -8088,6 +8131,142 @@ function renderTemplatesList(){
 function _findTemplate(id){
   return _templates.private.find(t=>t.id===id) || _templates.public.find(t=>t.id===id);
 }
+
+// Render an inline template picker for single-device admin panels.
+// Filters templates by type ('ssh' for switches, 'windows' for PCs).
+// Reuses the credential box already present in the parent admin panel.
+function _renderSingleDeviceTemplatePicker(parent, dev, type, credBox){
+  const all = [..._templates.private, ..._templates.public]
+    .filter(t => t.type === type);
+  if(!all.length){
+    parent.appendChild(adminInfo(
+      'No ' + type.toUpperCase() + ' templates saved yet. Create one from the 📜 Templates button in the toolbar.',
+      'muted'));
+    return;
+  }
+
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:4px';
+
+  const sel = document.createElement('select');
+  sel.className = 'sinput';
+  sel.style.cssText = 'flex:1;padding:7px 10px;font-family:var(--fm);font-size:.72rem';
+  sel.innerHTML = '<option value="">— pick a template —</option>' +
+    all.map(t => '<option value="'+t.id+'">'+escapeHtml(t.name)+
+      ' ('+t.commands.length+' cmd)</option>').join('');
+  row.appendChild(sel);
+
+  const runBtn = document.createElement('button');
+  runBtn.type='button'; runBtn.className='abtn primary';
+  runBtn.style.cssText='font-size:.72rem;padding:7px 12px;cursor:pointer;white-space:nowrap';
+  runBtn.textContent = '▶ Run';
+  runBtn.onclick = (e)=>{
+    e.preventDefault(); e.stopPropagation();
+    const id = sel.value;
+    if(!id){ showSyncToast('Pick a template first', 'none'); return; }
+    const t = _findTemplate(id);
+    if(!t){ showSyncToast('Template not found', 'none'); return; }
+    runTemplateOnSingleDevice(t, dev, credBox, runBtn);
+  };
+  row.appendChild(runBtn);
+  parent.appendChild(row);
+
+  // Show a preview of the selected template's commands below the picker
+  const preview = document.createElement('div');
+  preview.style.cssText = 'margin-top:5px;padding:7px 10px;background:rgba(0,0,0,.2);'+
+    'border-radius:4px;font-family:var(--fm);font-size:.62rem;color:var(--muted);'+
+    'white-space:pre-wrap;max-height:100px;overflow-y:auto;display:none';
+  parent.appendChild(preview);
+  sel.onchange = ()=>{
+    const t = _findTemplate(sel.value);
+    if(t && t.commands.length){
+      preview.style.display = '';
+      preview.textContent = t.commands.map((c,i)=>(i+1)+'. '+c).join('\n');
+    } else {
+      preview.style.display = 'none';
+    }
+  };
+}
+
+// Execute a template on ONE device using the credentials from the parent admin panel.
+// Sends the request through the same bulk endpoints (with a single target),
+// so all the audit + output modal wiring works identically.
+async function runTemplateOnSingleDevice(t, dev, credBox, btn){
+  const {user, pass} = getCreds(credBox);
+  if(!user || !pass){
+    showSyncToast('Enter username and password in the credentials box above', 'none');
+    return;
+  }
+  if(!confirm('Run template "' + t.name + '" on ' + (dev.name||dev.ip) + '?\n\n' +
+    'Commands:\n' + t.commands.slice(0,10).join('\n') +
+    (t.commands.length>10 ? '\n…' : ''))){
+    return;
+  }
+  const origLabel = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ Running…';
+  try {
+    if(t.type === 'ssh'){
+      const r = await fetch('/api/admin/run-switch-cmd', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          switch_ips: [dev.ip],
+          commands: t.commands.join('\n'),
+          user, pass,
+          template_name: t.name
+        })
+      });
+      const j = await r.json();
+      if(!j.ok){
+        showSyncToast('Template failed: ' + (j.error||'?'), 'removed');
+        return;
+      }
+      const items = (j.results||[]).map(r => ({
+        label: r.switch_ip, ok: r.ok,
+        output: r.output || '', error: r.error || '',
+      }));
+      showCmdOutputModal(
+        'TEMPLATE: ' + t.name,
+        dev.ip + ' · ' + t.commands.length + ' command' + (t.commands.length!==1?'s':''),
+        items
+      );
+      logAction(dev.mac, 'ssh-template', user,
+        j.results[0]?.ok ? 'ok' : 'fail',
+        'template=' + t.name + ' ' + (j.results[0]?.error||''));
+    } else {
+      const r = await fetch('/api/admin/bulk-cmd', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          targets: [{mac: dev.mac, ip: dev.ip, name: dev.name||''}],
+          cmd: t.commands.join(' ; '),
+          user, pass,
+          template_name: t.name
+        })
+      });
+      const j = await r.json();
+      if(!j.ok){
+        showSyncToast('Template failed: ' + (j.error||'?'), 'removed');
+        return;
+      }
+      const items = (j.results||[]).map(r => ({
+        label: r.name || r.ip || r.mac || '?', ok: r.ok,
+        output: r.output || '', error: r.error || '',
+      }));
+      showCmdOutputModal(
+        'TEMPLATE: ' + t.name,
+        (dev.name||dev.ip) + ' · ' + t.commands.length + ' command' + (t.commands.length!==1?'s':''),
+        items
+      );
+      logAction(dev.mac, 'windows-template', user,
+        j.results[0]?.ok ? 'ok' : 'fail',
+        'template=' + t.name + ' ' + (j.results[0]?.error||''));
+    }
+  } catch(e){
+    showSyncToast('Error: ' + e.message, 'removed');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origLabel;
+  }
+}
 function openTemplateEditor(){
   _tmplEditing = null;
   document.getElementById('tmpledit-title').textContent = 'NEW TEMPLATE';
@@ -8192,10 +8371,17 @@ function beginRunTemplate(id){
   const t = _findTemplate(id);
   if(!t){ showSyncToast('Template not found','none'); return; }
   _tmplPendingRun = t;
-  // Determine targets from bulk selection
-  const selectedMacs = [...bulkSelected];
+  // Determine targets: bulk selection first, else current admin-panel device.
+  let selectedMacs = [...bulkSelected];
+  // Fallback: if the single-device admin panel is open, use its device.
+  // Lets users open a switch's Admin Tools → Templates list → Run without
+  // needing to Ctrl+select the switch on the map first.
+  const admOpen = document.getElementById('ov-admin')?.classList.contains('open');
+  if(!selectedMacs.length && admOpen && window._currentAdminMac){
+    selectedMacs = [window._currentAdminMac];
+  }
   if(!selectedMacs.length){
-    showSyncToast('Select devices first (Ctrl+click on map)', 'none');
+    showSyncToast('Select devices first (Ctrl+click on map) or open a device\'s Admin Tools', 'none');
     return;
   }
   // Filter to relevant type
@@ -10218,6 +10404,21 @@ function showCmdOutputModal(title, subtitle, items){
       '<span style="color:var(--muted);font-size:.62rem">'+(item.ok?'OK':'FAIL')+'</span>';
 
     if(item.output || item.error){
+      // 🔍 Enlarge — opens a big single-device modal for this row alone.
+      // Handy when you have many devices stacked and each output is tall.
+      const zoomBtn = document.createElement('button');
+      zoomBtn.type='button';
+      zoomBtn.style.cssText='background:rgba(160,96,255,.10);border:1px solid #a060ff;'+
+        'color:#a060ff;padding:3px 9px;border-radius:4px;cursor:pointer;'+
+        'font-size:.62rem;font-family:var(--fm);flex-shrink:0';
+      zoomBtn.textContent='🔍 ENLARGE';
+      zoomBtn.title = 'Open output in a full-size window';
+      zoomBtn.onclick = (e)=>{
+        e.preventDefault(); e.stopPropagation();
+        openCmdOutputZoom(item);
+      };
+      hdr.appendChild(zoomBtn);
+
       const copyBtn = document.createElement('button');
       copyBtn.type='button';
       copyBtn.style.cssText='background:rgba(0,200,255,.10);border:1px solid var(--accent);'+
@@ -10239,7 +10440,7 @@ function showCmdOutputModal(title, subtitle, items){
     const output = document.createElement('pre');
     output.style.cssText = 'margin:0;padding:10px 12px;background:rgba(0,0,0,.35);'+
       'font-family:var(--fm);font-size:.7rem;color:var(--muted);line-height:1.5;'+
-      'white-space:pre-wrap;word-break:break-word;max-height:400px;overflow-y:auto';
+      'white-space:pre-wrap;word-break:break-word;max-height:260px;overflow-y:auto';
     if(item.error){
       output.innerHTML = '<span style="color:var(--offline)">ERROR: '+escapeHtml(item.error)+'</span>' +
         (item.output ? '\n\n' + escapeHtml(item.output) : '');
@@ -10271,6 +10472,40 @@ function showCmdOutputModal(title, subtitle, items){
   };
 
   openOv('ov-cmdout');
+}
+
+// Open a single-device output at large size — used from the 🔍 ENLARGE button
+// on individual result cards. Prevents wall-of-scroll problems when there
+// are many devices, each with substantial output.
+function openCmdOutputZoom(item){
+  document.getElementById('cmdoutzoom-title').textContent =
+    (item.ok ? '✓ ' : '✗ ') + (item.label || 'DEVICE OUTPUT');
+  document.getElementById('cmdoutzoom-sub').textContent =
+    item.ok ? 'Command completed successfully' : 'Command failed — see output below';
+  const body = document.getElementById('cmdoutzoom-body');
+  body.innerHTML = '';
+  if(item.error){
+    const errLine = document.createElement('div');
+    errLine.style.cssText = 'color:var(--offline);margin-bottom:10px;padding-bottom:8px;'+
+      'border-bottom:1px solid var(--border);font-weight:bold';
+    errLine.textContent = 'ERROR: ' + item.error;
+    body.appendChild(errLine);
+  }
+  const pre = document.createElement('div');
+  pre.textContent = item.output || (item.error ? '' : '(no output)');
+  body.appendChild(pre);
+
+  const copyBtn = document.getElementById('cmdoutzoom-copy');
+  copyBtn.textContent = '📋 COPY';
+  copyBtn.onclick = async ()=>{
+    const text = item.output || item.error || '';
+    try {
+      await navigator.clipboard.writeText(text);
+      copyBtn.textContent = '✓ COPIED';
+      setTimeout(()=>{ copyBtn.textContent = '📋 COPY'; }, 1500);
+    } catch(_){ showSyncToast('Copy failed','none'); }
+  };
+  openOv('ov-cmdoutzoom');
 }
 
 // Render switch results into any output div (bulk or single-switch admin)
