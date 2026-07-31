@@ -867,6 +867,35 @@ svg#cv.pen{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/s
   </div>
 </div>
 
+<!-- ══ REPLACEMENT APPROVAL MODAL ═══════════════════════════ -->
+<!-- Auto-migrate layout positions from replaced devices to their new MACs.
+     Shown after XML reload when replacements are detected. User picks which
+     to apply — the rest stay as orphans and require manual drag-and-drop. -->
+<div class="ov" id="ov-replacements" onclick="if(event.target===this)closeOv('ov-replacements')">
+  <div class="modal" style="width:min(720px,94vw);max-height:88vh">
+    <div class="mh">
+      <div>
+        <div class="mt">🔄 REPLACEMENTS DETECTED</div>
+        <div class="ms" id="rep-sub">Choose which replacements to apply to the map</div>
+      </div>
+      <button type="button" class="mcl" onclick="closeOv('ov-replacements')">✕</button>
+    </div>
+    <div class="mb" id="rep-body" style="padding:14px;max-height:70vh;overflow-y:auto;
+      display:flex;flex-direction:column;gap:11px"></div>
+    <div style="display:flex;justify-content:space-between;gap:8px;padding:11px 16px;
+      border-top:1px solid var(--border);background:var(--panel);align-items:center">
+      <div id="rep-count" style="font-size:.66rem;color:var(--muted)"></div>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="abtn" onclick="closeOv('ov-replacements')"
+          style="font-size:.72rem;padding:6px 14px;cursor:pointer;background:none;
+          border:1px solid var(--border);color:var(--muted)">Cancel</button>
+        <button type="button" class="abtn primary" id="rep-apply-btn" onclick="applyReplacements()"
+          style="font-size:.75rem;padding:7px 16px;cursor:pointer">✓ Apply selected</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ══ SNAPSHOT MANAGER MODAL ═══════════════════════════════════ -->
 <div class="ov" id="ov-snapshots" onclick="if(event.target===this)closeOv('ov-snapshots')">
   <div class="modal" style="width:640px;max-height:80vh">
@@ -981,6 +1010,19 @@ svg#cv.pen{cursor:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/s
           <div style="font-size:.82rem;color:var(--text)">📊 CSV (spreadsheet)</div>
           <div style="font-size:.68rem;color:var(--muted);margin-top:2px">
             For Excel / data analysis, UTF-8 with BOM
+          </div>
+        </div>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;
+        background:rgba(0,0,0,.2);border-radius:6px;cursor:pointer;
+        border:1px solid var(--border)">
+        <input type="radio" name="exp-fmt" id="exp-fmt-rack" value="rack"
+          style="cursor:pointer">
+        <div style="flex:1">
+          <div style="font-size:.82rem;color:var(--text)">🗄 Rack diagram (HTML)</div>
+          <div style="font-size:.68rem;color:var(--muted);margin-top:2px">
+            Every rack + all its switches with port assignments. Includes free switches.
+            <b>Not affected by filter.</b>
           </div>
         </div>
       </label>
@@ -2531,6 +2573,67 @@ function findOrphans(){
   result.total = result.free.length + result.rack.reduce((a,r)=>a+r.macs.length,0);
   console.log('[NetMap] Orphans:', result);
   return result;
+}
+
+// Find pairs of orphan → replacement.
+// An orphan is a MAC in the layout (free devices, racks, boxes) that's no
+// longer in the XML. A replacement is a device in the XML whose
+// <previous-mac> matches that orphan MAC.
+// Returns: [{orphanMac, orphanName, orphanLocation, newMac, newName, newDev, location}]
+// where location is 'free'|'rack'|'box' plus the specific target (rack id, etc.).
+function findReplacements(){
+  const pairs = [];
+  // Build a map: previous-mac → replacement device
+  const prevMap = {};   // OLDMAC (upper) -> new device
+  Object.values(allDevs).forEach(d=>{
+    const prev = (d['previous-mac'] || d.previous_mac || '').trim().toUpperCase();
+    if(prev) prevMap[prev] = d;
+  });
+  if(!Object.keys(prevMap).length) return pairs;
+
+  // Cache last-known names for orphans (may still be in historyMap)
+  const orphanName = (mac) => {
+    return historyMap[mac]?.name || deviceNotes[mac]?.name || mac;
+  };
+
+  // Free-placed orphans
+  Object.keys(layout.devices||{}).forEach(mac=>{
+    if(allDevs[mac]) return;    // still in XML — not an orphan
+    const macU = mac.toUpperCase();
+    const rep = prevMap[macU];
+    if(!rep) return;
+    pairs.push({
+      orphanMac: mac,
+      orphanName: orphanName(mac),
+      newMac: rep.mac,
+      newName: rep.name || rep.mac,
+      newDev: rep,
+      location: 'free',
+      locationLabel: 'On floor plan',
+    });
+  });
+
+  // Rack-placed orphans
+  (layout.racks||[]).forEach(r=>{
+    (r.switches||[]).forEach(mac=>{
+      if(allDevs[mac]) return;
+      const macU = mac.toUpperCase();
+      const rep = prevMap[macU];
+      if(!rep) return;
+      pairs.push({
+        orphanMac: mac,
+        orphanName: orphanName(mac),
+        newMac: rep.mac,
+        newName: rep.name || rep.mac,
+        newDev: rep,
+        location: 'rack',
+        locationTarget: r.id,
+        locationLabel: 'In rack: ' + (r.label || r.id),
+      });
+    });
+  });
+
+  return pairs;
 }
 
 // Remove all orphans from layout.json. Logs each removal.
@@ -7043,6 +7146,150 @@ async function reloadXml(){
 }
 
 // ── REPLACEMENT DETECTION ──────────────────────────────────────
+// Show a modal listing detected orphan → replacement pairs.
+// User ticks which to apply; unticked ones stay as orphans.
+// Called from processReplacements after an XML reload.
+let _pendingReplacements = [];
+function showReplacementApproval(pairs){
+  if(!pairs.length) return;
+  _pendingReplacements = pairs;
+  const body = document.getElementById('rep-body');
+  const sub = document.getElementById('rep-sub');
+  const countEl = document.getElementById('rep-count');
+  body.innerHTML = '';
+  sub.textContent = pairs.length + ' device' + (pairs.length!==1?'s':'') +
+    ' on the map ' + (pairs.length!==1?'have':'has') + ' been replaced according to the XML.';
+
+  // Header explaining what's happening
+  const info = document.createElement('div');
+  info.style.cssText = 'padding:10px 12px;background:rgba(0,200,255,.06);'+
+    'border-left:3px solid var(--accent);border-radius:4px;font-size:.7rem;line-height:1.5';
+  info.innerHTML =
+    'When a device is swapped (same switch + same port, different MAC), the XML records '+
+    'the replacement. Ticking a row transfers the old device\'s map position to the new device. '+
+    '<b>Unticked devices stay as orphans</b> — you can drag them from the sidebar to the map manually later.';
+  body.appendChild(info);
+
+  // Select-all/none row
+  const selRow = document.createElement('div');
+  selRow.style.cssText = 'display:flex;gap:12px;align-items:center;padding:6px 0';
+  selRow.innerHTML = `
+    <button type="button" onclick="_selectAllReps(true)"
+      style="background:none;border:1px solid var(--accent);color:var(--accent);
+      padding:4px 10px;border-radius:4px;cursor:pointer;font-size:.66rem">✓ Select all</button>
+    <button type="button" onclick="_selectAllReps(false)"
+      style="background:none;border:1px solid var(--border);color:var(--muted);
+      padding:4px 10px;border-radius:4px;cursor:pointer;font-size:.66rem">✗ Deselect all</button>`;
+  body.appendChild(selRow);
+
+  // Rows: one card per replacement pair
+  pairs.forEach((p, idx) => {
+    const row = document.createElement('label');
+    row.style.cssText = 'display:flex;gap:12px;align-items:center;padding:11px 12px;'+
+      'background:rgba(0,0,0,.22);border:1px solid var(--border);border-radius:6px;cursor:pointer';
+    const oldIcon = getIcon({type: (allDevs[p.orphanMac]?.type) ||
+      (historyMap[p.orphanMac]?.type) || 'unknown'});
+    const newIcon = getIcon(p.newDev);
+    row.innerHTML = `
+      <input type="checkbox" id="rep-cb-${idx}" checked
+        style="accent-color:var(--accent);width:16px;height:16px;flex-shrink:0">
+      <div style="flex:1;display:flex;align-items:center;gap:11px;font-size:.72rem">
+        <div style="flex:1;display:flex;flex-direction:column;gap:2px;opacity:.7">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span style="font-size:1rem">${oldIcon}</span>
+            <b style="color:var(--offline)">${escapeHtml(p.orphanName)}</b>
+          </div>
+          <div style="font-family:var(--fm);font-size:.6rem;color:var(--muted)">${escapeHtml(p.orphanMac)}</div>
+          <div style="font-size:.6rem;color:var(--muted)">${escapeHtml(p.locationLabel)}</div>
+        </div>
+        <div style="color:var(--accent);font-size:1.4rem;flex-shrink:0">→</div>
+        <div style="flex:1;display:flex;flex-direction:column;gap:2px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span style="font-size:1rem">${newIcon}</span>
+            <b style="color:var(--online)">${escapeHtml(p.newName)}</b>
+          </div>
+          <div style="font-family:var(--fm);font-size:.6rem;color:var(--muted)">${escapeHtml(p.newMac)}</div>
+          <div style="font-size:.6rem;color:var(--muted)">
+            ${escapeHtml(p.newDev.ip || '')} · VLAN ${escapeHtml(p.newDev.vlan || '?')} ·
+            ${escapeHtml(p.newDev.switch || '?')}:${escapeHtml(p.newDev.port || '?')}
+          </div>
+        </div>
+      </div>`;
+    body.appendChild(row);
+  });
+
+  countEl.textContent = pairs.length + ' replacement' + (pairs.length!==1?'s':'') + ' available';
+  document.getElementById('rep-apply-btn').disabled = false;
+  document.getElementById('rep-apply-btn').textContent = '✓ Apply selected';
+  openOv('ov-replacements');
+}
+
+function _selectAllReps(check){
+  _pendingReplacements.forEach((_, idx)=>{
+    const cb = document.getElementById('rep-cb-' + idx);
+    if(cb) cb.checked = check;
+  });
+}
+
+async function applyReplacements(){
+  const pairs = _pendingReplacements;
+  const btn = document.getElementById('rep-apply-btn');
+  const selected = pairs.filter((_, idx) => {
+    const cb = document.getElementById('rep-cb-' + idx);
+    return cb && cb.checked;
+  });
+  if(!selected.length){
+    showSyncToast('Nothing selected — closing', 'none');
+    closeOv('ov-replacements');
+    _pendingReplacements = [];
+    return;
+  }
+  btn.disabled = true; btn.textContent = '⏳ Applying…';
+  let applied = 0;
+  selected.forEach(p=>{
+    if(p.location === 'free'){
+      // Transfer the layout entry from old MAC to new MAC
+      const entry = layout.devices[p.orphanMac];
+      if(entry){
+        layout.devices[p.newMac] = entry;
+        delete layout.devices[p.orphanMac];
+        applied++;
+      }
+    } else if(p.location === 'rack'){
+      // Replace the MAC in the rack's switches array
+      const rack = (layout.racks||[]).find(r => r.id === p.locationTarget);
+      if(rack){
+        const idx = (rack.switches||[]).indexOf(p.orphanMac);
+        if(idx >= 0){
+          rack.switches[idx] = p.newMac;
+          applied++;
+        }
+      }
+    }
+    // Move over device notes and photos too if present
+    if(deviceNotes[p.orphanMac] && !deviceNotes[p.newMac]){
+      deviceNotes[p.newMac] = deviceNotes[p.orphanMac];
+      delete deviceNotes[p.orphanMac];
+    }
+    if(layout.device_photos && layout.device_photos[p.orphanMac] &&
+       !layout.device_photos[p.newMac]){
+      layout.device_photos[p.newMac] = layout.device_photos[p.orphanMac];
+      delete layout.device_photos[p.orphanMac];
+    }
+  });
+  try {
+    await saveLayout();
+    showSyncToast('Applied ' + applied + ' replacement' + (applied!==1?'s':''), 'new');
+    closeOv('ov-replacements');
+    _pendingReplacements = [];
+    renderAll();
+    if(typeof renderSidebar==='function') renderSidebar();
+  } catch(e){
+    showSyncToast('Save failed: ' + e.message, 'removed');
+    btn.disabled = false; btn.textContent = '✓ Apply selected';
+  }
+}
+
 // After an XML reload, scan for devices that newly appeared with a <previous-mac> tag.
 // For each such X replacing Y:
 //  - If X was in any storage box → remove X from that box (X is now active)
@@ -7114,6 +7361,15 @@ function processReplacements(beforeMacs, beforePlaced){
   if(moves.length){
     saveLayout(); renderAll(); renderSidebar();
     showReplacementReport(moves);
+  }
+
+  // Also show the approval modal for map-placed orphans that have replacements.
+  // These are separate from storage-box replacements (handled above) — these
+  // are devices that live on the floor plan or in racks.
+  const mapPairs = findReplacements();
+  if(mapPairs.length){
+    // Delay slightly if we just showed the storage-box report, to avoid stacking modals
+    setTimeout(()=>showReplacementApproval(mapPairs), moves.length ? 600 : 0);
   }
 }
 
@@ -12458,9 +12714,191 @@ function _collectExportRows(){
   };
 }
 
+// Rack diagram export — one styled HTML page listing every rack and every
+// switch inside it. Includes free switches (not assigned to any rack) as a
+// dedicated section. NOT affected by filter — always full inventory.
+function exportRackDiagram(ts){
+  const racks = layout.racks || [];
+  const rackedSwitches = new Set();
+  racks.forEach(r => (r.switches||[]).forEach(m => rackedSwitches.add(m)));
+
+  const allSwitches = Object.values(allDevs).filter(d =>
+    d.type === 'switch' || d.type === 'router'
+  );
+  const freeSwitches = allSwitches.filter(d => !rackedSwitches.has(d.mac));
+
+  // Downstream devices indexed by their upstream switch IP
+  const bySwitchIp = {};
+  Object.values(allDevs).forEach(d => {
+    const swIp = (d.switch||'').trim();
+    if(!swIp) return;
+    if(!bySwitchIp[swIp]) bySwitchIp[swIp] = [];
+    bySwitchIp[swIp].push(d);
+  });
+
+  const escH = (s) => String(s ?? '').replace(/[&<>"']/g, m => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[m]));
+
+  const renderSwitch = (d) => {
+    const downstream = (bySwitchIp[d.ip] || [])
+      .slice()
+      .sort((a,b) => {
+        const pa = parseInt(a.port,10), pb = parseInt(b.port,10);
+        if(!isNaN(pa) && !isNaN(pb)) return pa - pb;
+        return String(a.port||'').localeCompare(String(b.port||''));
+      });
+    const st = effectiveStatus(d.mac);
+    const stColor = st==='online' ? '#20d468' : st==='offline' ? '#f03858' : '#f0a020';
+    const portRows = downstream.length ?
+      downstream.map(dd => {
+        const ddSt = effectiveStatus(dd.mac);
+        const ddColor = ddSt==='online' ? '#20d468' : ddSt==='offline' ? '#f03858' : '#f0a020';
+        return '<tr>'+
+          '<td style="font-family:monospace;color:#888">'+escH(dd.port||'?')+'</td>'+
+          '<td>'+escH(dd.name||dd.mac)+'</td>'+
+          '<td style="font-family:monospace;font-size:.8em">'+escH(dd.ip||'')+'</td>'+
+          '<td style="font-family:monospace;font-size:.8em;color:#888">'+escH(dd.mac)+'</td>'+
+          '<td style="font-family:monospace">'+escH(dd.vlan||'')+'</td>'+
+          '<td>'+escH(dd.type||'')+'</td>'+
+          '<td><span style="display:inline-block;width:9px;height:9px;border-radius:50%;'+
+          'background:'+ddColor+'"></span></td>'+
+          '</tr>';
+      }).join('') :
+      '<tr><td colspan="7" style="color:#888;text-align:center;padding:12px">'+
+      'No downstream devices in XML</td></tr>';
+    return `
+      <div style="border:1px solid #333;border-radius:8px;overflow:hidden;
+        margin-bottom:16px;background:#1a1a1a;break-inside:avoid;page-break-inside:avoid">
+        <div style="padding:12px 16px;background:#252525;border-bottom:1px solid #333;
+          display:flex;align-items:center;gap:12px">
+          <span style="display:inline-block;width:11px;height:11px;border-radius:50%;
+            background:${stColor}"></span>
+          <div style="flex:1">
+            <div style="font-size:1.02em;font-weight:600;color:#eee">${escH(d.name||d.mac)}</div>
+            <div style="font-size:.78em;color:#888;margin-top:2px;font-family:monospace">
+              ${escH(d.ip||'')} · ${escH(d.mac)} · VLAN ${escH(d.vlan||'?')}
+            </div>
+          </div>
+          <div style="font-size:.78em;color:#888">
+            ${downstream.length} downstream device${downstream.length!==1?'s':''}
+          </div>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:.82em">
+          <thead>
+            <tr style="background:#222;color:#888;text-align:left">
+              <th style="padding:6px 8px;border-bottom:1px solid #333">Port</th>
+              <th style="padding:6px 8px;border-bottom:1px solid #333">Name</th>
+              <th style="padding:6px 8px;border-bottom:1px solid #333">IP</th>
+              <th style="padding:6px 8px;border-bottom:1px solid #333">MAC</th>
+              <th style="padding:6px 8px;border-bottom:1px solid #333">VLAN</th>
+              <th style="padding:6px 8px;border-bottom:1px solid #333">Type</th>
+              <th style="padding:6px 8px;border-bottom:1px solid #333">St</th>
+            </tr>
+          </thead>
+          <tbody>${portRows}</tbody>
+        </table>
+      </div>`;
+  };
+
+  const rackSections = racks.map(rack => {
+    const rackName = rack.label || rack.id;
+    const switches = (rack.switches||[]).map(m => allDevs[m]).filter(Boolean);
+    const cards = switches.length ?
+      switches.map(renderSwitch).join('') :
+      '<div style="color:#888;padding:16px;text-align:center;font-style:italic">Empty rack</div>';
+    return `
+      <section style="margin-bottom:32px">
+        <h2 style="color:#0cf;border-bottom:2px solid #0cf;padding-bottom:6px;
+          font-size:1.15em;margin-top:0">
+          🗄 ${escH(rackName)}
+          <span style="float:right;font-size:.7em;color:#888;font-weight:normal">
+            ${switches.length} switch${switches.length!==1?'es':''}
+          </span>
+        </h2>
+        ${cards}
+      </section>`;
+  }).join('');
+
+  let freeSection = '';
+  if(freeSwitches.length){
+    const cards = freeSwitches.map(renderSwitch).join('');
+    freeSection = `
+      <section style="margin-bottom:32px">
+        <h2 style="color:#f0a020;border-bottom:2px solid #f0a020;padding-bottom:6px;
+          font-size:1.15em">
+          ⚡ Unracked switches
+          <span style="float:right;font-size:.7em;color:#888;font-weight:normal">
+            ${freeSwitches.length} switch${freeSwitches.length!==1?'es':''}
+          </span>
+        </h2>
+        <p style="color:#888;font-size:.8em;margin:0 0 12px">
+          Switches that exist in the inventory but haven't been assigned to any rack.
+        </p>
+        ${cards}
+      </section>`;
+  }
+
+  const totalSwitches = allSwitches.length;
+  const totalDownstream = Object.values(bySwitchIp).reduce((a,arr)=>a+arr.length, 0);
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>Rack Diagram — ${escH(ts)}</title>
+<style>
+  body{background:#111;color:#ddd;font-family:-apple-system,Segoe UI,Arial,sans-serif;
+    padding:24px;max-width:1100px;margin:0 auto;line-height:1.4}
+  h1{color:#0cf;font-size:1.4em;margin:0 0 6px}
+  table{color:#ddd}
+  th{font-weight:600;font-size:.9em}
+  td{padding:5px 8px;border-bottom:1px solid #262626}
+  tr:hover td{background:#222}
+  @media print {
+    body{background:white;color:black}
+    h1,h2{color:black !important;border-color:#333 !important}
+    td,th{color:black}
+    tr:hover td{background:transparent}
+    div{background:white !important;color:black !important;border-color:#666 !important}
+  }
+</style>
+</head>
+<body>
+  <h1>NetMap — Rack Diagram</h1>
+  <div style="color:#888;font-size:.85em;margin-bottom:20px">
+    Generated ${escH(ts)} · ${racks.length} rack${racks.length!==1?'s':''} ·
+    ${totalSwitches} total switch${totalSwitches!==1?'es':''} ·
+    ${totalDownstream} downstream device${totalDownstream!==1?'s':''}
+  </div>
+  ${rackSections || '<p style="color:#888;padding:16px;text-align:center">No racks defined in the layout.</p>'}
+  ${freeSection}
+  <footer style="margin-top:40px;padding-top:16px;border-top:1px solid #333;
+    color:#666;font-size:.75em;text-align:center">
+    NetMap · Layout snapshot at export time · Not filtered
+  </footer>
+</body></html>`;
+
+  const blob = new Blob([html], {type:'text/html;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'netmap-racks-' + new Date().toISOString().slice(0,10) + '.html';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  closeOv('ov-export');
+  showSyncToast('Rack diagram exported', 'new');
+}
+
 function exportStatusAs(format){
   const now=new Date();
   const ts=now.toLocaleString();
+
+  // Rack diagram is a completely different report — bypass filter, always show
+  // every rack + every switch (both rack-assigned and free).
+  if(format === 'rack'){
+    exportRackDiagram(ts);
+    return;
+  }
+
   const {rows: placed, filterStr} = _collectExportRows();
 
   if(format==='csv'){
