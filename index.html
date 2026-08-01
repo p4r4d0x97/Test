@@ -12660,8 +12660,10 @@ function exportStatus(){
 }
 
 function exportStatusConfirm(){
-  const html = document.getElementById('exp-fmt-html');
-  const format = (html && html.checked) ? 'html' : 'csv';
+  // Read the checked radio from the format group — three options now:
+  // html (filtered report), csv (spreadsheet), rack (collapsible tree diagram).
+  const checked = document.querySelector('input[name="exp-fmt"]:checked');
+  const format = checked ? checked.value : 'html';
   closeOv('ov-export');
   exportStatusAs(format);
 }
