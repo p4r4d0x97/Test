@@ -12717,6 +12717,8 @@ function _collectExportRows(){
 // Rack diagram export — one styled HTML page listing every rack and every
 // switch inside it. Includes free switches (not assigned to any rack) as a
 // dedicated section. NOT affected by filter — always full inventory.
+// Each switch is a collapsible card so a plant with 50+ switches renders
+// cleanly (collapsed shows a one-line summary; expand for full port list).
 function exportRackDiagram(ts){
   const racks = layout.racks || [];
   const rackedSwitches = new Set();
@@ -12740,7 +12742,7 @@ function exportRackDiagram(ts){
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
   }[m]));
 
-  const renderSwitch = (d) => {
+  const renderSwitch = (d, idx) => {
     const downstream = (bySwitchIp[d.ip] || [])
       .slice()
       .sort((a,b) => {
@@ -12750,70 +12752,89 @@ function exportRackDiagram(ts){
       });
     const st = effectiveStatus(d.mac);
     const stColor = st==='online' ? '#20d468' : st==='offline' ? '#f03858' : '#f0a020';
+    const stLabel = st==='online' ? 'ONLINE' : st==='offline' ? 'OFFLINE' : 'NO INFO';
+
+    // Count online / offline / unknown downstream for the collapsed summary
+    let onCount=0, offCount=0, unkCount=0;
+    downstream.forEach(dd => {
+      const s = effectiveStatus(dd.mac);
+      if(s==='online') onCount++;
+      else if(s==='offline') offCount++;
+      else unkCount++;
+    });
+
+    // Build tree rows — grouped visually by port
     const portRows = downstream.length ?
       downstream.map(dd => {
         const ddSt = effectiveStatus(dd.mac);
         const ddColor = ddSt==='online' ? '#20d468' : ddSt==='offline' ? '#f03858' : '#f0a020';
+        const typeIcon = {
+          switch:'🔀', router:'📶', access_point:'📡', server:'🖥️',
+          camera:'📷', printer:'🖨️', pc:'💻', unknown:'❓',
+          controller:'✖', helmholz:'🌐', timereg:'⏰', accesscontrol:'🔒'
+        }[dd.type] || '·';
         return '<tr>'+
-          '<td style="font-family:monospace;color:#888">'+escH(dd.port||'?')+'</td>'+
-          '<td>'+escH(dd.name||dd.mac)+'</td>'+
-          '<td style="font-family:monospace;font-size:.8em">'+escH(dd.ip||'')+'</td>'+
-          '<td style="font-family:monospace;font-size:.8em;color:#888">'+escH(dd.mac)+'</td>'+
-          '<td style="font-family:monospace">'+escH(dd.vlan||'')+'</td>'+
-          '<td>'+escH(dd.type||'')+'</td>'+
-          '<td><span style="display:inline-block;width:9px;height:9px;border-radius:50%;'+
-          'background:'+ddColor+'"></span></td>'+
+          '<td class="port-cell"><span class="tree-branch">├─</span>'+
+          '<span class="port-num">'+escH(dd.port||'?')+'</span></td>'+
+          '<td class="type-cell">'+typeIcon+'</td>'+
+          '<td class="name-cell">'+escH(dd.name||dd.mac)+'</td>'+
+          '<td class="mono">'+escH(dd.ip||'')+'</td>'+
+          '<td class="mono muted">'+escH(dd.mac)+'</td>'+
+          '<td class="mono">'+escH(dd.vlan||'')+'</td>'+
+          '<td><span class="dot" style="background:'+ddColor+'"></span></td>'+
           '</tr>';
       }).join('') :
-      '<tr><td colspan="7" style="color:#888;text-align:center;padding:12px">'+
-      'No downstream devices in XML</td></tr>';
+      '<tr><td colspan="7" class="empty-row">No downstream devices in XML</td></tr>';
+
+    // Details element (collapsible) — <details> is native HTML, no JS needed
     return `
-      <div style="border:1px solid #333;border-radius:8px;overflow:hidden;
-        margin-bottom:16px;background:#1a1a1a;break-inside:avoid;page-break-inside:avoid">
-        <div style="padding:12px 16px;background:#252525;border-bottom:1px solid #333;
-          display:flex;align-items:center;gap:12px">
-          <span style="display:inline-block;width:11px;height:11px;border-radius:50%;
-            background:${stColor}"></span>
-          <div style="flex:1">
-            <div style="font-size:1.02em;font-weight:600;color:#eee">${escH(d.name||d.mac)}</div>
-            <div style="font-size:.78em;color:#888;margin-top:2px;font-family:monospace">
-              ${escH(d.ip||'')} · ${escH(d.mac)} · VLAN ${escH(d.vlan||'?')}
+      <details class="switch-card" ${downstream.length > 24 ? '' : ''} id="sw-${idx}">
+        <summary>
+          <span class="dot big" style="background:${stColor}"></span>
+          <div class="sw-info">
+            <div class="sw-name">${escH(d.name||d.mac)}</div>
+            <div class="sw-meta">
+              <span class="mono">${escH(d.ip||'')}</span> ·
+              <span class="mono muted">${escH(d.mac)}</span> ·
+              VLAN <span class="mono">${escH(d.vlan||'?')}</span>
             </div>
           </div>
-          <div style="font-size:.78em;color:#888">
-            ${downstream.length} downstream device${downstream.length!==1?'s':''}
+          <div class="sw-counts">
+            <span class="pill ok">${onCount}</span>
+            <span class="pill fail">${offCount}</span>
+            <span class="pill unk">${unkCount}</span>
+            <span class="pill total">${downstream.length}</span>
           </div>
-        </div>
-        <table style="width:100%;border-collapse:collapse;font-size:.82em">
+          <span class="chev">▸</span>
+        </summary>
+        <table class="port-table">
           <thead>
-            <tr style="background:#222;color:#888;text-align:left">
-              <th style="padding:6px 8px;border-bottom:1px solid #333">Port</th>
-              <th style="padding:6px 8px;border-bottom:1px solid #333">Name</th>
-              <th style="padding:6px 8px;border-bottom:1px solid #333">IP</th>
-              <th style="padding:6px 8px;border-bottom:1px solid #333">MAC</th>
-              <th style="padding:6px 8px;border-bottom:1px solid #333">VLAN</th>
-              <th style="padding:6px 8px;border-bottom:1px solid #333">Type</th>
-              <th style="padding:6px 8px;border-bottom:1px solid #333">St</th>
+            <tr>
+              <th>Port</th><th></th><th>Name</th><th>IP</th>
+              <th>MAC</th><th>VLAN</th><th>St</th>
             </tr>
           </thead>
           <tbody>${portRows}</tbody>
         </table>
-      </div>`;
+      </details>`;
   };
 
+  let switchIdx = 0;
   const rackSections = racks.map(rack => {
     const rackName = rack.label || rack.id;
     const switches = (rack.switches||[]).map(m => allDevs[m]).filter(Boolean);
+    // Total downstream across this rack
+    const rackDownstream = switches.reduce((a,sw)=>a+(bySwitchIp[sw.ip]||[]).length, 0);
     const cards = switches.length ?
-      switches.map(renderSwitch).join('') :
-      '<div style="color:#888;padding:16px;text-align:center;font-style:italic">Empty rack</div>';
+      switches.map(sw => renderSwitch(sw, switchIdx++)).join('') :
+      '<div class="empty-rack">Empty rack</div>';
     return `
-      <section style="margin-bottom:32px">
-        <h2 style="color:#0cf;border-bottom:2px solid #0cf;padding-bottom:6px;
-          font-size:1.15em;margin-top:0">
+      <section class="rack-section">
+        <h2 class="rack-header">
           🗄 ${escH(rackName)}
-          <span style="float:right;font-size:.7em;color:#888;font-weight:normal">
-            ${switches.length} switch${switches.length!==1?'es':''}
+          <span class="rack-summary">
+            ${switches.length} switch${switches.length!==1?'es':''} ·
+            ${rackDownstream} downstream
           </span>
         </h2>
         ${cards}
@@ -12822,19 +12843,18 @@ function exportRackDiagram(ts){
 
   let freeSection = '';
   if(freeSwitches.length){
-    const cards = freeSwitches.map(renderSwitch).join('');
+    const freeDownstream = freeSwitches.reduce((a,sw)=>a+(bySwitchIp[sw.ip]||[]).length, 0);
+    const cards = freeSwitches.map(sw => renderSwitch(sw, switchIdx++)).join('');
     freeSection = `
-      <section style="margin-bottom:32px">
-        <h2 style="color:#f0a020;border-bottom:2px solid #f0a020;padding-bottom:6px;
-          font-size:1.15em">
+      <section class="rack-section unracked">
+        <h2 class="rack-header unracked-header">
           ⚡ Unracked switches
-          <span style="float:right;font-size:.7em;color:#888;font-weight:normal">
-            ${freeSwitches.length} switch${freeSwitches.length!==1?'es':''}
+          <span class="rack-summary">
+            ${freeSwitches.length} switch${freeSwitches.length!==1?'es':''} ·
+            ${freeDownstream} downstream
           </span>
         </h2>
-        <p style="color:#888;font-size:.8em;margin:0 0 12px">
-          Switches that exist in the inventory but haven't been assigned to any rack.
-        </p>
+        <p class="note">Switches that exist in the inventory but aren't assigned to any rack.</p>
         ${cards}
       </section>`;
   }
@@ -12846,35 +12866,200 @@ function exportRackDiagram(ts){
 <html><head><meta charset="utf-8">
 <title>Rack Diagram — ${escH(ts)}</title>
 <style>
-  body{background:#111;color:#ddd;font-family:-apple-system,Segoe UI,Arial,sans-serif;
-    padding:24px;max-width:1100px;margin:0 auto;line-height:1.4}
-  h1{color:#0cf;font-size:1.4em;margin:0 0 6px}
-  table{color:#ddd}
-  th{font-weight:600;font-size:.9em}
-  td{padding:5px 8px;border-bottom:1px solid #262626}
-  tr:hover td{background:#222}
+  :root {
+    --bg:#0f1418; --panel:#1a1f24; --panel2:#252b32; --border:#2c333a;
+    --text:#dde3ea; --muted:#8892a0; --accent:#00c8ff; --online:#20d468;
+    --offline:#f03858; --unknown:#f0a020;
+    --f:-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    --fm:'JetBrains Mono','Consolas',monospace;
+  }
+  * { box-sizing:border-box }
+  body {
+    background:var(--bg); color:var(--text); font-family:var(--f);
+    padding:24px; max-width:1200px; margin:0 auto; line-height:1.5;
+  }
+  h1 { color:var(--accent); font-size:1.55em; margin:0 0 4px; letter-spacing:.02em }
+  .lead { color:var(--muted); font-size:.85em; margin-bottom:24px }
+  .controls {
+    display:flex; gap:8px; margin-bottom:24px; padding:12px 16px;
+    background:var(--panel); border:1px solid var(--border); border-radius:8px;
+    align-items:center; flex-wrap:wrap;
+  }
+  .controls button {
+    background:transparent; color:var(--accent); border:1px solid var(--accent);
+    padding:6px 14px; border-radius:5px; cursor:pointer; font-family:var(--fm);
+    font-size:.75em; letter-spacing:.03em; transition:all .12s;
+  }
+  .controls button:hover { background:rgba(0,200,255,.1) }
+  .controls .spacer { flex:1 }
+  .controls input[type=search] {
+    background:var(--bg); color:var(--text); border:1px solid var(--border);
+    padding:6px 12px; border-radius:5px; font-family:var(--f); font-size:.78em;
+    min-width:220px;
+  }
+  .controls input[type=search]:focus {
+    outline:none; border-color:var(--accent);
+  }
+  .rack-section { margin-bottom:32px }
+  .rack-header {
+    color:var(--accent); font-size:1.18em; margin:0 0 12px;
+    padding:8px 0 8px 4px; border-bottom:2px solid var(--accent);
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  }
+  .rack-header.unracked-header {
+    color:var(--unknown); border-bottom-color:var(--unknown);
+  }
+  .rack-summary {
+    margin-left:auto; font-size:.68em; color:var(--muted); font-weight:normal;
+    font-family:var(--fm);
+  }
+  .note { color:var(--muted); font-size:.82em; margin:0 0 12px }
+  .empty-rack {
+    color:var(--muted); padding:14px; text-align:center; font-style:italic;
+    border:1px dashed var(--border); border-radius:8px;
+  }
+
+  /* Collapsible switch card */
+  .switch-card {
+    border:1px solid var(--border); border-radius:8px; overflow:hidden;
+    margin-bottom:10px; background:var(--panel);
+  }
+  .switch-card summary {
+    display:flex; align-items:center; gap:12px; padding:12px 16px;
+    cursor:pointer; user-select:none; list-style:none;
+    background:var(--panel2); transition:background .12s;
+  }
+  .switch-card summary::-webkit-details-marker { display:none }
+  .switch-card summary:hover { background:#2c333a }
+  .switch-card[open] summary { border-bottom:1px solid var(--border) }
+  .switch-card[open] .chev { transform:rotate(90deg) }
+  .chev {
+    color:var(--muted); font-family:var(--fm); font-size:.9em;
+    transition:transform .15s; flex-shrink:0;
+  }
+  .sw-info { flex:1; min-width:200px }
+  .sw-name { font-size:1em; font-weight:600; color:var(--text) }
+  .sw-meta { font-size:.75em; color:var(--muted); margin-top:2px }
+  .sw-counts { display:flex; gap:4px; flex-shrink:0 }
+  .pill {
+    display:inline-block; padding:2px 9px; border-radius:11px;
+    font-family:var(--fm); font-size:.7em; font-weight:600;
+  }
+  .pill.ok    { background:rgba(32,212,104,.15); color:var(--online); }
+  .pill.fail  { background:rgba(240,56,88,.15); color:var(--offline); }
+  .pill.unk   { background:rgba(240,160,32,.15); color:var(--unknown); }
+  .pill.total { background:rgba(0,200,255,.15); color:var(--accent); }
+
+  .dot {
+    display:inline-block; width:9px; height:9px; border-radius:50%; flex-shrink:0;
+  }
+  .dot.big { width:12px; height:12px; box-shadow:0 0 8px rgba(0,0,0,.3) }
+
+  /* Port table (only visible when card is expanded) */
+  .port-table {
+    width:100%; border-collapse:collapse; font-size:.85em;
+    background:var(--bg);
+  }
+  .port-table thead tr {
+    background:var(--panel2); color:var(--muted); text-align:left;
+  }
+  .port-table th {
+    padding:8px 10px; font-weight:600; font-size:.85em;
+    border-bottom:1px solid var(--border);
+    text-transform:uppercase; letter-spacing:.04em;
+  }
+  .port-table td {
+    padding:7px 10px; border-bottom:1px solid var(--border);
+  }
+  .port-table tbody tr:last-child td { border-bottom:none }
+  .port-table tbody tr:hover td { background:rgba(0,200,255,.04) }
+  .port-cell { white-space:nowrap; font-family:var(--fm); color:var(--muted) }
+  .tree-branch { color:var(--border); margin-right:6px; user-select:none }
+  .port-num { color:var(--accent); font-weight:600 }
+  .type-cell { text-align:center; font-size:1.1em; width:28px }
+  .name-cell { color:var(--text); font-weight:500 }
+  .mono  { font-family:var(--fm); font-size:.92em }
+  .muted { color:var(--muted); font-size:.85em }
+  .empty-row {
+    color:var(--muted); text-align:center; padding:16px; font-style:italic;
+  }
+
+  footer {
+    margin-top:40px; padding-top:16px; border-top:1px solid var(--border);
+    color:var(--muted); font-size:.72em; text-align:center;
+  }
+
+  /* Print — black on white */
   @media print {
-    body{background:white;color:black}
-    h1,h2{color:black !important;border-color:#333 !important}
-    td,th{color:black}
-    tr:hover td{background:transparent}
-    div{background:white !important;color:black !important;border-color:#666 !important}
+    :root {
+      --bg:#fff; --panel:#fff; --panel2:#f5f5f5; --border:#ccc;
+      --text:#000; --muted:#555;
+    }
+    body { max-width:none; padding:12px }
+    .controls { display:none }
+    .switch-card {
+      break-inside:avoid; page-break-inside:avoid;
+      border-color:#666; box-shadow:none;
+    }
+    .switch-card:not([open]) summary { border-bottom:1px solid #666 }
+    /* Force all cards open when printing */
+    .switch-card { }
+    .switch-card summary::marker { display:none }
+    .rack-header, h1 { color:#000 !important }
+    .chev { display:none }
+    .port-table tbody tr:hover td { background:transparent }
   }
 </style>
 </head>
 <body>
   <h1>NetMap — Rack Diagram</h1>
-  <div style="color:#888;font-size:.85em;margin-bottom:20px">
+  <div class="lead">
     Generated ${escH(ts)} · ${racks.length} rack${racks.length!==1?'s':''} ·
     ${totalSwitches} total switch${totalSwitches!==1?'es':''} ·
     ${totalDownstream} downstream device${totalDownstream!==1?'s':''}
   </div>
-  ${rackSections || '<p style="color:#888;padding:16px;text-align:center">No racks defined in the layout.</p>'}
+
+  <div class="controls">
+    <button onclick="expandAll(true)">➕ Expand all</button>
+    <button onclick="expandAll(false)">➖ Collapse all</button>
+    <div class="spacer"></div>
+    <input type="search" id="q" placeholder="Filter switches by name, IP, MAC…"
+      oninput="filterSwitches(this.value)">
+  </div>
+
+  ${rackSections || '<p class="note">No racks defined in the layout.</p>'}
   ${freeSection}
-  <footer style="margin-top:40px;padding-top:16px;border-top:1px solid #333;
-    color:#666;font-size:.75em;text-align:center">
-    NetMap · Layout snapshot at export time · Not filtered
+
+  <footer>
+    NetMap · Layout snapshot at export time · Not filtered · Click a switch header to expand
   </footer>
+
+<` + `script>
+  function expandAll(open){
+    document.querySelectorAll('details.switch-card').forEach(d => {
+      d.open = open;
+    });
+  }
+  function filterSwitches(term){
+    const t = term.trim().toLowerCase();
+    document.querySelectorAll('details.switch-card').forEach(d => {
+      const text = d.querySelector('summary').textContent.toLowerCase();
+      d.style.display = (!t || text.includes(t)) ? '' : 'none';
+    });
+    // Hide rack sections whose switches are all hidden
+    document.querySelectorAll('section.rack-section').forEach(s => {
+      const anyVisible = [...s.querySelectorAll('details.switch-card')]
+        .some(d => d.style.display !== 'none');
+      s.style.display = (!t || anyVisible) ? '' : 'none';
+    });
+  }
+  // Auto-expand results when searching (helps see which switch matched)
+  document.getElementById('q').addEventListener('input', e => {
+    if(e.target.value.trim()) expandAll(true);
+  });
+  // On print, force everything open
+  window.addEventListener('beforeprint', () => expandAll(true));
+<` + `/script>
 </body></html>`;
 
   const blob = new Blob([html], {type:'text/html;charset=utf-8'});
