@@ -38,10 +38,14 @@ $CooldownSeconds    = 5                                # minimum seconds between
 $CaptureFullWindow  = $true                            # $false = use $RelativeRegion instead
 $RelativeRegion     = @{ X = 0; Y = 0; Width = 300; Height = 40 }  # pixels, relative to window top-left corner
 $LogFile            = Join-Path $PSScriptRoot "ScreenWatchdog.log"
-$LogOcrText         = $true                            # log what OCR actually read each cycle (helps tuning)
+$EnableLogging      = $false                           # set $true to write ScreenWatchdog.log again
+$UpscaleFactor      = 2                                # upsize captured image before OCR (improves small-text accuracy)
+$DoubleCheckMs      = 300                               # 2nd capture this many ms after the 1st, to dodge a blinking cursor
+$ContrastBoost      = $true                             # convert to high-contrast grayscale before OCR (helps with colored backgrounds)
 # ====================================================
 
 function Write-Log($msg) {
+    if (-not $EnableLogging) { return }
     try { Add-Content -Path $LogFile -Value "$(Get-Date -Format o)  $msg" -ErrorAction SilentlyContinue } catch {}
 }
 
@@ -119,6 +123,45 @@ function Get-ScreenText($rect) {
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     try { $g.CopyFromScreen($x, $y, 0, 0, (New-Object System.Drawing.Size $w, $h)) } finally { $g.Dispose() }
 
+    if ($UpscaleFactor -gt 1) {
+        $bigW = $w * $UpscaleFactor
+        $bigH = $h * $UpscaleFactor
+        $bigBmp = New-Object System.Drawing.Bitmap $bigW, $bigH
+        $bg = [System.Drawing.Graphics]::FromImage($bigBmp)
+        $bg.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $bg.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        try { $bg.DrawImage($bmp, 0, 0, $bigW, $bigH) } finally { $bg.Dispose() }
+        $bmp.Dispose()
+        $bmp = $bigBmp
+    }
+
+    if ($ContrastBoost) {
+        # Grayscale + push contrast toward pure black/white so colored backgrounds (yellow, etc.)
+        # stop competing with the text for OCR's attention.
+        $cW = $bmp.Width; $cH = $bmp.Height
+        $contrastBmp = New-Object System.Drawing.Bitmap $cW, $cH
+        $cg = [System.Drawing.Graphics]::FromImage($contrastBmp)
+        # Standard luminosity-preserving grayscale matrix, with extra weight pushed to widen contrast.
+        $matrixElements = [float[][]]@(
+            [float[]]@(0.6, 0.6, 0.6, 0, 0),
+            [float[]]@(0.6, 0.6, 0.6, 0, 0),
+            [float[]]@(0.6, 0.6, 0.6, 0, 0),
+            [float[]]@(0, 0, 0, 1, 0),
+            [float[]]@(-0.3, -0.3, -0.3, 0, 1)
+        )
+        $colorMatrix = New-Object System.Drawing.Imaging.ColorMatrix (,$matrixElements)
+        $attrs = New-Object System.Drawing.Imaging.ImageAttributes
+        $attrs.SetColorMatrix($colorMatrix)
+        try {
+            $cg.DrawImage($bmp, (New-Object System.Drawing.Rectangle(0, 0, $cW, $cH)), 0, 0, $cW, $cH, [System.Drawing.GraphicsUnit]::Pixel, $attrs)
+        } finally {
+            $cg.Dispose()
+            $attrs.Dispose()
+        }
+        $bmp.Dispose()
+        $bmp = $contrastBmp
+    }
+
     $ms = New-Object System.IO.MemoryStream
     $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
     $bmp.Dispose()
@@ -166,14 +209,23 @@ while ($true) {
     try {
         $rect = Get-TargetWindowRect
         if ($null -ne $rect) {
-            $text = Get-ScreenText $rect
-            if ($LogOcrText -and $text) { Write-Log "OCR read: $text" }
-            foreach ($c in $TriggerChars) {
-                if ($text.Contains($c)) {
-                    Invoke-Restart $c
-                    break
+            $foundChar = $null
+
+            $text1 = Get-ScreenText $rect
+            if ($text1) { Write-Log "OCR read (pass 1): $text1" }
+            foreach ($c in $TriggerChars) { if ($text1.Contains($c)) { $foundChar = $c; break } }
+
+            if ($null -eq $foundChar -and $DoubleCheckMs -gt 0) {
+                Start-Sleep -Milliseconds $DoubleCheckMs
+                $rect2 = Get-TargetWindowRect   # re-fetch in case window moved/closed
+                if ($null -ne $rect2) {
+                    $text2 = Get-ScreenText $rect2
+                    if ($text2) { Write-Log "OCR read (pass 2): $text2" }
+                    foreach ($c in $TriggerChars) { if ($text2.Contains($c)) { $foundChar = $c; break } }
                 }
             }
+
+            if ($null -ne $foundChar) { Invoke-Restart $foundChar }
         }
     } catch {
         Write-Log "Loop error: $_"
