@@ -12,39 +12,35 @@ REM Ping timeout in milliseconds
 set "TIMEOUT=500"
 set "OUTFILE=%~dp0available_ips.txt"
 set "TMPFILE=%~dp0available_ips.tmp"
-set "LOGFILE=%~dp0came_online_log.txt"
 REM ==============================================
 
-echo ============================================
-echo  Initial scan: %SUBNET%.%START% - %SUBNET%.%END%
-echo ============================================
+REM If a list already exists, resume from it instead of rescanning
+if exist "%OUTFILE%" (
+    echo Resuming with existing list: %OUTFILE%
+    goto LOOP
+)
 
-if exist "%OUTFILE%" del "%OUTFILE%"
-type nul > "%OUTFILE%"
+:SCAN
+echo Scanning %SUBNET%.%START% - %SUBNET%.%END% ...
+type nul > "%TMPFILE%"
 set /a FREE=0
 
 for /L %%i in (%START%,1,%END%) do (
     REM Check for "TTL=" so "Destination host unreachable" counts as offline
     ping -n 1 -w %TIMEOUT% %SUBNET%.%%i | find "TTL=" >nul
     if errorlevel 1 (
-        >>"%OUTFILE%" echo %SUBNET%.%%i
+        >>"%TMPFILE%" echo %SUBNET%.%%i
         set /a FREE+=1
-        echo   %SUBNET%.%%i  - no reply
-    ) else (
-        echo   %SUBNET%.%%i  - ONLINE
     )
 )
 
-echo.
-echo Initial scan done. !FREE! possibly free IPs saved to:
-echo   %OUTFILE%
+move /y "%TMPFILE%" "%OUTFILE%" >nul
+echo Scan done. !FREE! free IPs saved to %OUTFILE%
 
 :LOOP
 echo.
 echo Next check in %INTERVAL% seconds. Press Ctrl+C to stop.
-timeout /t %INTERVAL% /nobreak
-echo.
-echo [!date! !time!] Re-checking free IPs...
+timeout /t %INTERVAL% /nobreak >nul
 
 type nul > "%TMPFILE%"
 set /a FREE=0
@@ -54,9 +50,6 @@ for /f "usebackq delims=" %%a in ("%OUTFILE%") do (
     if errorlevel 1 (
         >>"%TMPFILE%" echo %%a
         set /a FREE+=1
-    ) else (
-        echo   %%a came ONLINE - removed from list
-        >>"%LOGFILE%" echo [!date! !time!] %%a came online
     )
 )
 
